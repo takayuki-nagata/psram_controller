@@ -41,12 +41,12 @@ async def write_and_check(env: PsramEnv, addr: int, data: int):
 
 @cocotb.test()
 async def test_init(dut):
-    """Power-up sequence: busy until initialized, no access before tVCS, model clean."""
+    """Power-up sequence: not ready until initialized, no access before tVCS, model clean."""
     env = PsramEnv(dut)
     await env.start(wait_init=False)
-    assert dut.busy.value == 1, "controller must be busy during initialization"
+    assert dut.init_done.value == 0 and dut.req_ready.value == 0, "controller ready during initialization"
     cycles = 0
-    while dut.busy.value == 1:
+    while dut.init_done.value == 0:
         await FallingEdge(dut.clk)
         cycles += 1
         assert cycles * env.period_ps / 1000 < 2 * T_VCS_NS, "initialization takes too long"
@@ -200,18 +200,11 @@ async def test_reset_during_access(dut):
     env = PsramEnv(dut)
     await env.start()
     await env.write(0x4000, 0x11111111)
-    # Start a write and reset while it is in flight
-    await FallingEdge(dut.clk)
-    dut.req.value = 1
-    dut.we.value = 1
-    dut.addr.value = 0x4004
-    dut.wdata.value = 0x22222222
-    dut.wstrb.value = 0xF
-    await FallingEdge(dut.clk)
-    dut.req.value = 0
+    await env.request(True, 0x4004, 0x22222222)  # in flight from here on
     for _ in range(10):
         await FallingEdge(dut.clk)
     dut.rst_n.value = 0
+    env.accepted = env.responses  # the in-flight request is dropped by the reset
     for _ in range(5):
         await FallingEdge(dut.clk)
     dut.rst_n.value = 1
@@ -219,6 +212,42 @@ async def test_reset_during_access(dut):
     await write_and_check(env, 0x4008, 0x33333333)
     assert await env.read(0x4008) == 0x33333333
     await env.finish()
+
+
+@cocotb.test()
+async def test_handshake(dut):
+    """valid/ready: a request is held while the controller is busy (and before init_done),
+    accepted exactly once, and answered exactly once."""
+    env = PsramEnv(dut)
+    await env.start(wait_init=False)
+    # Presented during initialization: held until init_done, then accepted
+    env.backdoor_write(0x5000, 0xAAAA5555)
+    await env.request(False, 0x5000, max_cycles=100_000)
+    assert dut.init_done.value == 1
+    assert await env.response(False, 0x5000) == 0xAAAA5555
+    # Presented while busy with a read: not accepted until the read has been answered
+    await env.request(False, 0x5000)
+    dut.req_valid.value = 1
+    dut.req_we.value = 1
+    dut.req_addr.value = 0x5004
+    dut.req_wdata.value = 0x12345678
+    dut.req_wstrb.value = 0xF
+    busy_cycles = 0
+    while True:
+        await FallingEdge(dut.clk)
+        if dut.rsp_valid.value == 1:
+            assert dut.rsp_rdata.value.to_unsigned() == 0xAAAA5555
+            break
+        assert dut.req_ready.value == 0, "req_ready while a request is in flight"
+        busy_cycles += 1
+    assert busy_cycles > 10
+    # The held write is accepted in the cycle of the read response (back-to-back)
+    assert dut.req_ready.value == 1, "controller not ready in the cycle of its response"
+    await env.request(True, 0x5004, 0x12345678)
+    await env.response(True, 0x5004)
+    assert env.backdoor_word(0x5004) == 0x12345678
+    await env.finish()
+    assert env.accepted == 3 and env.responses == 3
 
 
 # Documentation of the die mapping used by the backdoor (kept executable)

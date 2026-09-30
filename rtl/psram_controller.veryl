@@ -9,15 +9,26 @@ pub module psram_controller #(
     clk  : input clock          ,
     rst_n: input reset_async_low,
 
-    // Host / User Interface (compatible with RISC-V SoC memory bus)
-    req  : input  logic    ,
-    we   : input  logic    ,
-    addr : input  logic<24>,
-    wdata: input  logic<32>,
-    wstrb: input  logic<4> ,
-    rdata: output logic<32>,
-    ready: output logic    ,
-    busy : output logic    ,
+    // Host interface, valid/ready:
+    // - A request is accepted in a cycle with req_valid && req_ready. Once req_valid is
+    //   raised it must stay High, with req_we/addr/wdata/wstrb unchanged, until accepted.
+    // - Every accepted request gets exactly one response: rsp_valid High for one cycle,
+    //   with rsp_rdata valid in that cycle for reads. One request is in flight at a time;
+    //   req_ready is High again in the cycle rsp_valid is.
+    // - req_addr: byte address, 4-byte aligned. [23] = 0: memory (8 MB), 1: register
+    //   space (ID0 0x800000, ID1 0x800004, CR0 0x800020, CR1 0x800024; a register write
+    //   loads wdata[7:0]/[23:16] into die 0 and wdata[15:8]/[31:24] into die 1).
+    // - req_wstrb: byte enables for memory writes (register writes ignore them).
+    // - init_done: the PSRAM power-up sequence is over (req_ready is Low until then).
+    req_valid: input  logic    ,
+    req_ready: output logic    ,
+    req_we   : input  logic    , // 1: write, 0: read
+    req_addr : input  logic<24>,
+    req_wdata: input  logic<32>,
+    req_wstrb: input  logic<4> ,
+    rsp_valid: output logic    ,
+    rsp_rdata: output logic<32>,
+    init_done: output logic    ,
 
     // Internal PSRAM Physical Pins (connected via tangnano9k.cst)
     O_psram_ck     : output logic    <2> ,
@@ -26,7 +37,8 @@ pub module psram_controller #(
     O_psram_reset_n: output logic    <2> ,
     IO_psram_dq    : inout  tri logic<16>,
     IO_psram_rwds  : inout  tri logic<2> ,
-    dbg_sample     : output logic    <32>,
+    // Debug: FSM and pin state for an on-chip tracer; leave unconnected otherwise
+    dbg_sample: output logic<32>,
 ) {
     // Interconnect between psram_core and psram_phy_io
     var psram_ck_reg: logic    ;
@@ -51,14 +63,15 @@ pub module psram_controller #(
     ) (
         clk                       ,
         rst_n                     ,
-        req                       ,
-        we                        ,
-        addr                      ,
-        wdata                     ,
-        wstrb                     ,
-        rdata                     ,
-        ready                     ,
-        busy                      ,
+        req_valid                 ,
+        req_ready                 ,
+        req_we                    ,
+        req_addr                  ,
+        req_wdata                 ,
+        req_wstrb                 ,
+        rsp_valid                 ,
+        rsp_rdata                 ,
+        init_done                 ,
         psram_ck_reg              ,
         ck_en                     ,
         cs_n_out    : cs_n_sig    ,

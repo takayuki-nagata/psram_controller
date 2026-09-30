@@ -35,20 +35,22 @@ pub module psram_top #(
     var psram_wstrb     : logic<4> ;
     var psram_rdata     : logic<32>;
     var psram_ready     : logic    ;
-    var psram_busy      : logic    ;
+    var psram_req_ready : logic    ;
+    var psram_init_done : logic    ;
     var psram_dbg_sample: logic<32>;
 
     inst u_psram_ctrl: psram::psram_controller (
         clk            : clk             ,
         rst_n          : rst_n           ,
-        req            : psram_req       ,
-        we             : psram_we        ,
-        addr           : psram_addr      ,
-        wdata          : psram_wdata     ,
-        wstrb          : psram_wstrb     ,
-        rdata          : psram_rdata     ,
-        ready          : psram_ready     ,
-        busy           : psram_busy      ,
+        req_valid      : psram_req       ,
+        req_ready      : psram_req_ready ,
+        req_we         : psram_we        ,
+        req_addr       : psram_addr      ,
+        req_wdata      : psram_wdata     ,
+        req_wstrb      : psram_wstrb     ,
+        rsp_rdata      : psram_rdata     ,
+        rsp_valid      : psram_ready     ,
+        init_done      : psram_init_done ,
         O_psram_ck     : O_psram_ck      ,
         O_psram_ck_n   : O_psram_ck_n    ,
         O_psram_cs_n   : O_psram_cs_n    ,
@@ -466,7 +468,8 @@ pub module psram_top #(
             diag_char_idx   = 5'd0;
             diag_psram_done = 1'b0;
         } else {
-            psram_req      = 1'b0;
+            // Hold a request until the controller accepts it
+            psram_req      = psram_req && !psram_req_ready;
             uart_we        = 1'b0;
             tracer_trigger = 1'b0;
 
@@ -476,7 +479,7 @@ pub module psram_top #(
 
             case test_state {
                 TestState::WAIT_INIT: {
-                    if !psram_busy {
+                    if psram_init_done {
                         diag_psram_done = 1'b0;
                         test_state      = TestState::DIAG_REQ;
                     }

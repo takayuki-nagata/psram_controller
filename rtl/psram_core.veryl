@@ -9,15 +9,16 @@ pub module psram_core #(
     clk  : input clock          , // System clock
     rst_n: input reset_async_low,
 
-    // Host / User Bus Interface
-    req  : input  logic    ,
-    we   : input  logic    , // 1: Write, 0: Read
-    addr : input  logic<24>, // Byte address (bit 23: 0=Memory Space, 1=Register Space)
-    wdata: input  logic<32>, // 32-bit write word
-    wstrb: input  logic<4> , // Byte write mask (1: write, 0: mask)
-    rdata: output logic<32>, // 32-bit read word
-    ready: output logic    , // 1-cycle pulse when transaction completes
-    busy : output logic    , // 1: controller busy
+    // Host interface (see psram_controller)
+    req_valid: input  logic    ,
+    req_ready: output logic    ,
+    req_we   : input  logic    ,
+    req_addr : input  logic<24>,
+    req_wdata: input  logic<32>,
+    req_wstrb: input  logic<4> ,
+    rsp_valid: output logic    ,
+    rsp_rdata: output logic<32>,
+    init_done: output logic    ,
 
     // Physical Interface to psram_phy_io
     psram_ck_reg: output logic    ,
@@ -44,26 +45,27 @@ pub module psram_core #(
         RECOVERY,
     }
 
-    var state     : State    ;
-    var timer     : logic<16>;
-    var ca_shift  : logic<48>;
-    var r_we      : logic    ;
-    var r_wdata   : logic<32>;
-    var r_wstrb   : logic<4> ;
-    var r_rdata   : logic<32>;
-    var r_ready   : logic    ;
-    var r_cs_n    : logic    ;
-    var r_reset_n : logic    ;
-    var r_ck      : logic    ;
-    var r_ck_en   : logic    ;
-    var r_dq_oe   : logic    ;
-    var r_dq_out  : logic<16>;
-    var r_rwds_oe : logic    ;
-    var r_rwds_out: logic<2> ;
+    var state      : State    ;
+    var timer      : logic<16>;
+    var ca_shift   : logic<48>;
+    var r_we       : logic    ;
+    var r_wdata    : logic<32>;
+    var r_wstrb    : logic<4> ;
+    var r_rdata    : logic<32>;
+    var r_rsp_valid: logic    ;
+    var r_cs_n     : logic    ;
+    var r_reset_n  : logic    ;
+    var r_ck       : logic    ;
+    var r_ck_en    : logic    ;
+    var r_dq_oe    : logic    ;
+    var r_dq_out   : logic<16>;
+    var r_rwds_oe  : logic    ;
+    var r_rwds_out : logic<2> ;
 
-    assign ready        = r_ready;
-    assign rdata        = r_rdata;
-    assign busy         = state != State::IDLE;
+    assign req_ready    = state == State::IDLE;
+    assign rsp_valid    = r_rsp_valid;
+    assign rsp_rdata    = r_rdata;
+    assign init_done    = state != State::RESET_ASSERT && state != State::RESET_WAIT;
     assign psram_ck_reg = r_ck;
     assign ck_en        = r_ck_en;
     assign cs_n_out     = {r_cs_n, r_cs_n};
@@ -99,10 +101,10 @@ pub module psram_core #(
     // 48-bit Command-Address packet (W955D8MBYA Table 2 & Table 5)
     // Each 32-bit host word is one 16-bit word in each of the two x8 dies (die 0: DQ[7:0],
     // die 1: DQ[15:8]), so the 21-bit die word address (A20..A0) is addr[22:2].
-    let word_addr: logic<21> = addr[22:2];
-    let is_reg   : logic     = addr[23];
+    let word_addr: logic<21> = req_addr[22:2];
+    let is_reg   : logic     = req_addr[23];
     let ca_packet: logic<48> = {
-        if we ? 1'b0 : 1'b1, // CA[47]: 1: Read, 0: Write
+        if req_we ? 1'b0 : 1'b1, // CA[47]: 1: Read, 0: Write
         is_reg, // CA[46]: 0 = Memory Space, 1 = Register Space
         is_reg, // CA[45]: 0 = Wrapped Burst for Memory, 1 = Register
         11'b0, // CA[44:34]: Reserved
@@ -121,24 +123,24 @@ pub module psram_core #(
 
     always_ff (clk, rst_n) {
         if_reset {
-            state      = State::RESET_ASSERT;
-            timer      = 16'd0;
-            ca_shift   = 48'd0;
-            r_we       = 1'b0;
-            r_wdata    = 32'd0;
-            r_wstrb    = 4'd0;
-            r_rdata    = 32'd0;
-            r_ready    = 1'b0;
-            r_cs_n     = 1'b1;
-            r_reset_n  = 1'b0;
-            r_ck       = 1'b0;
-            r_ck_en    = 1'b0;
-            r_dq_oe    = 1'b0;
-            r_dq_out   = 16'd0;
-            r_rwds_oe  = 1'b0;
-            r_rwds_out = 2'b00;
+            state       = State::RESET_ASSERT;
+            timer       = 16'd0;
+            ca_shift    = 48'd0;
+            r_we        = 1'b0;
+            r_wdata     = 32'd0;
+            r_wstrb     = 4'd0;
+            r_rdata     = 32'd0;
+            r_rsp_valid = 1'b0;
+            r_cs_n      = 1'b1;
+            r_reset_n   = 1'b0;
+            r_ck        = 1'b0;
+            r_ck_en     = 1'b0;
+            r_dq_oe     = 1'b0;
+            r_dq_out    = 16'd0;
+            r_rwds_oe   = 1'b0;
+            r_rwds_out  = 2'b00;
         } else {
-            r_ready = 1'b0;
+            r_rsp_valid = 1'b0;
 
             case state {
                 State::RESET_ASSERT: {
@@ -175,10 +177,10 @@ pub module psram_core #(
                     r_rwds_oe = 1'b0;
                     timer     = 16'd0;
 
-                    if req {
-                        r_we     = we;
-                        r_wdata  = wdata;
-                        r_wstrb  = wstrb;
+                    if req_valid {
+                        r_we     = req_we;
+                        r_wdata  = req_wdata;
+                        r_wstrb  = req_wstrb;
                         ca_shift = ca_packet;
                         r_cs_n   = 1'b0; // Assert CS#
                         r_ck_en  = 1'b1; // Start clocking
@@ -320,9 +322,9 @@ pub module psram_core #(
                     r_ck_en = 1'b0;
                     r_ck    = 1'b0;
                     if (timer as u64) >= CS_RECOVERY_CYCLES {
-                        r_ready = 1'b1; // Pulse ready to host
-                        timer   = 16'd0;
-                        state   = State::IDLE;
+                        r_rsp_valid = 1'b1; // One-cycle response
+                        timer       = 16'd0;
+                        state       = State::IDLE;
                     } else {
                         timer += 16'd1;
                     }

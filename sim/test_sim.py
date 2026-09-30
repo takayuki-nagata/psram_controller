@@ -28,6 +28,7 @@ TESTS = [
     "test_random",
     "test_back_to_back",
     "test_reset_during_access",
+    "test_handshake",
 ]
 
 

@@ -10,14 +10,15 @@ module tb_psram_controller #(
 );
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
-    reg         req = 1'b0;
-    reg         we = 1'b0;
-    reg  [23:0] addr = 24'h0;
-    reg  [31:0] wdata = 32'h0;
-    reg  [3:0]  wstrb = 4'h0;
-    wire [31:0] rdata;
-    wire        ready;
-    wire        busy;
+    reg         req_valid = 1'b0;
+    wire        req_ready;
+    reg         req_we = 1'b0;
+    reg  [23:0] req_addr = 24'h0;
+    reg  [31:0] req_wdata = 32'h0;
+    reg  [3:0]  req_wstrb = 4'h0;
+    wire        rsp_valid;
+    wire [31:0] rsp_rdata;
+    wire        init_done;
     wire [31:0] dbg_sample;
 
     wire [1:0]  psram_ck;
@@ -32,14 +33,15 @@ module tb_psram_controller #(
     ) dut (
         .clk            (clk),
         .rst_n          (rst_n),
-        .req            (req),
-        .we             (we),
-        .addr           (addr),
-        .wdata          (wdata),
-        .wstrb          (wstrb),
-        .rdata          (rdata),
-        .ready          (ready),
-        .busy           (busy),
+        .req_valid      (req_valid),
+        .req_ready      (req_ready),
+        .req_we         (req_we),
+        .req_addr       (req_addr),
+        .req_wdata      (req_wdata),
+        .req_wstrb      (req_wstrb),
+        .rsp_valid      (rsp_valid),
+        .rsp_rdata      (rsp_rdata),
+        .init_done      (init_done),
         .O_psram_ck     (psram_ck),
         .O_psram_ck_n   (psram_ck_n),
         .O_psram_cs_n   (psram_cs_n),

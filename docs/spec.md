@@ -93,20 +93,22 @@ Following `CS#` assertion Low, a 48-bit (6-byte) Command-Address packet is trans
   - `CA[7:3]`: Reserved (all `0`)
   - `CA[2:0]`: Lower Column Address A2..A0 (Word in Half-Page)
 
-*Note: HyperBus addresses 16-bit words. A byte address `addr` is translated via `word_addr = addr[22:1]`.*
+*Note: HyperBus addresses 16-bit words (A20..A0 per die). Each 32-bit host word is one 16-bit word in each of the two x8 dies, so the die word address is `addr[22:2]`. Register space: CA[16] selects CR0/CR1 and CA[0] ID1/CR1, i.e. host addresses ID0 `0x800000`, ID1 `0x800004`, CR0 `0x800020`, CR1 `0x800024`.*
 
 ### 3.3 Latency Phase
 - By default, the memory chip operates in **Fixed Latency Mode** (`CR0[3] = 1`) with Initial Latency = 6 clocks (`CR0[7:4] = 0001b`).
-- In Fixed Latency mode, the latency period is always **2 x Initial Latency = 12 PSRAM clock cycles** (24 DDR half-cycles / system clock cycles), regardless of refresh collision.
+- In Fixed Latency mode, the latency period is always **2 x Initial Latency = 12 PSRAM clock cycles**, regardless of refresh collision.
+- The latency count starts with the **third CA clock** (datasheet Figures 9 and 11): with the CA on clocks 1-3, the first data word is transferred on **clock 15**.
+- Register writes have **zero latency**: the data word follows the CA on clock 4, and the host does not drive RWDS (datasheet 7.4, 9.2).
 
 ### 3.4 Data Phase
 - **Write Transaction**:
-  - The controller drives `DQ[15:0]` on both clock edges.
-  - `RWDS[1:0]` acts as byte write masks (`0` = write byte, `1` = mask byte).
-  - A 32-bit word is written across 2 DDR half-cycles (Word 0 on edge 1, Word 1 on edge 2).
+  - The controller drives `DQ[15:0]` on both clock edges, center aligned (data changes on the system clock rising edge, CK changes on the falling edge).
+  - `RWDS[1:0]` acts as byte write masks (`0` = write byte, `1` = mask byte), driven Low as a preamble for one PSRAM clock before the data.
+  - A 32-bit word is written across 2 DDR half-cycles (host `wdata[15:0]` on the CK rising edge, `wdata[31:16]` on the falling edge).
 - **Read Transaction**:
-  - The PSRAM drives `DQ[15:0]` and transitions `RWDS` synchronously with data edges.
-  - The controller samples Word 0 on edge 1 and Word 1 on edge 2.
+  - The PSRAM drives `DQ[15:0]` and `RWDS` edge aligned (valid tCKD <= 5.5 ns after each CK edge).
+  - The controller samples each half word half a system clock after the CK edge that launched it, and keeps CS# Low for one more cycle so the last half word is still driven when sampled (datasheet Table 14 note 3).
 
 ### 3.5 CS# Recovery Time
 - Upon completing a transaction, `CS#` is de-asserted High.
@@ -117,35 +119,26 @@ Following `CS#` assertion Low, a 48-bit (6-byte) Command-Address packet is trans
 ## 4. Controller Architecture
 
 ### 4.1 Host Bus Interface
-| Signal | Direction | Width | Description |
-|---|---|---|---|
-| `clk` | Input | 1 | 27 MHz System Clock |
-| `rst_n` | Input | 1 | Asynchronous Active-Low Reset |
-| `req` | Input | 1 | Access request pulse (1 cycle) |
-| `we` | Input | 1 | Write Enable (`1` = Write, `0` = Read) |
-| `addr` | Input | 24 | Byte Address (bit 23: `0` = Memory, `1` = Register) |
-| `wdata` | Input | 32 | 32-bit Write Data |
-| `wstrb` | Input | 4 | Byte write strobes (`1` = write, `0` = mask) |
-| `rdata` | Output | 32 | 32-bit Read Data |
-| `ready` | Output | 1 | Access completion pulse (1 cycle) |
-| `busy` | Output | 1 | High while an access transaction is in progress |
+See the table in [README.md](../README.md#host-bus-interface-specification): a valid/ready request
+channel (`req_valid`, `req_ready`, `req_we`, `req_addr`, `req_wdata`, `req_wstrb`), a one-cycle
+response (`rsp_valid`, `rsp_rdata`) and `init_done`. `CLK_HZ` sets the system clock frequency;
+the reset pulse, power-up wait and CS# recovery are derived from the datasheet values in ns.
 
 ### 4.2 Finite State Machine (FSM)
 1. `RESET_ASSERT`: Holds `O_psram_reset_n` Low for `tRP` (>= 200 ns).
 2. `RESET_WAIT`: Drives `O_psram_reset_n` High and waits `tVCS` (150 us).
-3. `IDLE`: Awaits `req` (`busy = 0`, `ready = 0`).
+3. `IDLE`: `req_ready = 1`; accepts a request.
 4. `SEND_CA`: Drives `CS# = 0` and transmits the 48-bit CA packet over 6 system cycles.
-5. `WAIT_LATENCY`: Waits 12 PSRAM clocks (24 system cycles).
+5. `WAIT_LATENCY`: Waits for the fixed latency (skipped for register writes).
 6. `WRITE_DATA`: Drives 32-bit `wdata` in two DDR half-cycles (Word 0, Word 1).
 7. `READ_DATA`: Samples 32-bit `rdata` in two DDR half-cycles (Word 0, Word 1).
-8. `RECOVERY`: De-asserts `CS# = 1`, waits `tRWR`, pulses `ready = 1`, and returns to `IDLE`.
+8. `RECOVERY`: De-asserts `CS# = 1`, waits `tRWR`, pulses `rsp_valid = 1`, and returns to `IDLE`.
 
 ---
 
 ## 5. RISC-V SoC Integration Guide
 
-To connect `psram_controller` to a RISC-V processor (e.g., `unified_cpu` in the VUX9K SoC):
-1. In the address decoder, map PSRAM to an address space (e.g., `0x8000_0000` - `0x807F_FFFF` for 64Mbit).
-2. Route the CPU's memory read/write requests to `req`, `we`, `addr`, `wdata`, and `wstrb`.
-3. When `busy` is asserted, stall the CPU pipeline (`MEM_WAIT` state).
-4. When `ready` pulses, latch `rdata` into the CPU load data register and resume execution.
+1. Map PSRAM to an address window (8 MB of memory space, plus the register space if needed).
+2. Present CPU loads/stores as requests (`req_valid` held until `req_ready`).
+3. Stall the CPU until `rsp_valid`; latch `rsp_rdata` for loads.
+4. Hold off accesses until `init_done` (about 200 us after reset).

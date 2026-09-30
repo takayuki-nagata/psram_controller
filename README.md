@@ -198,10 +198,31 @@ C1F: 6 00 0 0 0 00 5F 5F
 
 ## Host Bus Interface Specification
 
-The `psram_controller` exposes a simple, synchronous bus interface suitable for connecting to RISC-V SoC buses:
+`psram_controller` has a valid/ready request channel and a one-cycle response. Parameter
+`CLK_HZ` (default 27 MHz) is the system clock frequency; the PSRAM clock is `CLK_HZ / 2`.
+The tests run at 18 MHz (VUX9K) and 27 MHz (this board).
 
 | Port | Direction | Width | Description |
 |---|---|---|---|
+| `clk` | Input | 1 | System clock (`CLK_HZ`) |
+| `rst_n` | Input | 1 | Active-Low asynchronous reset |
+| `req_valid` | Input | 1 | Request valid; hold (with the payload unchanged) until accepted |
+| `req_ready` | Output | 1 | Request accepted in a cycle with `req_valid && req_ready` |
+| `req_we` | Input | 1 | `1`: write, `0`: read |
+| `req_addr` | Input | 24 | Byte address, 4-byte aligned (bit 23: `0` = memory, `1` = register space) |
+| `req_wdata` | Input | 32 | Write data |
+| `req_wstrb` | Input | 4 | Byte enables for memory writes |
+| `rsp_valid` | Output | 1 | One-cycle response, exactly one per accepted request |
+| `rsp_rdata` | Output | 32 | Read data, valid with `rsp_valid` |
+| `init_done` | Output | 1 | PSRAM power-up sequence finished (`req_ready` is Low until then) |
+| `dbg_sample` | Output | 32 | FSM/pin state for an on-chip tracer; leave unconnected if unused |
+
+One request is in flight at a time; `req_ready` is High again in the cycle of `rsp_valid`,
+so the next request can be accepted back-to-back. Register space: ID0 `0x800000`,
+ID1 `0x800004`, CR0 `0x800020`, CR1 `0x800024` (a register write loads `wdata[7:0]`/`[23:16]`
+into die 0 and `wdata[15:8]`/`[31:24]` into die 1).
+
+---|---|---|---|
 | `clk` | Input | 1 | 27 MHz system clock |
 | `rst_n` | Input | 1 | Active-Low asynchronous reset |
 | `req` | Input | 1 | Access request pulse (assert for 1 cycle) |
