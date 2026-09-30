@@ -30,7 +30,7 @@ DEMO_SIM_DIR   := $(DEMO_BUILD_DIR)/sim
 DEMO_SYNTH_DIR := $(DEMO_BUILD_DIR)/synth
 CST_FILE       := $(DEMO_DIR)/tangnano9k.cst
 
-.PHONY: all fmt check veryl veryl-demo sim-demo synth pnr bitstream prog-sram test-hw clean
+.PHONY: all fmt check lint veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
 
 all: sim-demo bitstream
 
@@ -51,12 +51,12 @@ DEMO_VERYL_SRCS := $(IP_VERYL_SRCS) $(wildcard $(DEMO_DIR)/*.veryl) $(wildcard $
 
 $(VERYL_OUT_DIR)/.stamp: $(IP_VERYL_SRCS)
 	@mkdir -p $(VERYL_OUT_DIR)
-	$(VERYL) build --out-dir $(VERYL_OUT_DIR)
+	$(VERYL) build --quiet --out-dir $(VERYL_OUT_DIR)
 	@touch $@
 
 $(DEMO_VERYL_DIR)/.stamp: $(DEMO_VERYL_SRCS)
 	@mkdir -p $(DEMO_VERYL_DIR)
-	cd $(DEMO_DIR) && $(VERYL) build --out-dir $(CURDIR)/$(DEMO_VERYL_DIR)
+	cd $(DEMO_DIR) && $(VERYL) build --quiet --out-dir $(CURDIR)/$(DEMO_VERYL_DIR)
 	@touch $@
 
 veryl: $(VERYL_OUT_DIR)/.stamp
@@ -77,6 +77,18 @@ DEMO_SRCS := $(DEMO_IP_SRCS) \
              $(DEMO_VERYL_DIR)/uart/uart_tx.sv \
              $(DEMO_VERYL_DIR)/uart/uart_controller.sv \
              $(DEMO_VERYL_DIR)/psram_top.sv
+
+# Controller IP sources, compilation order (packages first)
+IP_SRCS := $(VERYL_OUT_DIR)/rtl/psram_pkg.sv \
+           $(VERYL_OUT_DIR)/rtl/psram_core.sv \
+           rtl/psram_phy_io.sv \
+           $(VERYL_OUT_DIR)/rtl/psram_controller.sv
+
+# Verilator lint of the IP. Warnings are reported but not yet fatal: the RTL
+# clean-up that removes them is still to come.
+VERILATOR ?= verilator
+lint: $(VERYL_OUT_DIR)/.stamp
+	$(VERILATOR) --lint-only -Wall -Wno-fatal --top-module psram_controller $(IP_SRCS)
 
 # ===== Demo: RTL smoke simulation (Icarus Verilog) =====
 sim-demo: $(DEMO_VERYL_DIR)/.stamp
@@ -104,6 +116,18 @@ $(DEMO_SYNTH_DIR)/psram_pnr.json: $(DEMO_SYNTH_DIR)/psram.json $(CST_FILE)
 		--seed 2
 
 pnr: $(DEMO_SYNTH_DIR)/psram_pnr.json
+
+# Timing across several placement seeds (nextpnr fails the run if any clock misses)
+STA_FREQ  ?= 27.0
+STA_SEEDS ?= 2 3 5 7 11
+sta: $(DEMO_SYNTH_DIR)/psram.json $(CST_FILE)
+	@for seed in $(STA_SEEDS); do \
+		echo "=== nextpnr seed $$seed @ $(STA_FREQ) MHz ==="; \
+		$(NEXTPNR) --device GW1NR-LV9QN88PC6/I5 --vopt family=GW1N-9C --vopt cst=$(CST_FILE) \
+			--json $< --write $(DEMO_SYNTH_DIR)/sta_seed$$seed.json \
+			--freq $(STA_FREQ) --seed $$seed --quiet --log $(DEMO_SYNTH_DIR)/sta_seed$$seed.log || exit 1; \
+		grep 'Max frequency' $(DEMO_SYNTH_DIR)/sta_seed$$seed.log | tail -1; \
+	done
 
 $(DEMO_SYNTH_DIR)/pack.fs: $(DEMO_SYNTH_DIR)/psram_pnr.json
 	$(GOWIN_PACK) -d GW1N-9C -o $@ $<

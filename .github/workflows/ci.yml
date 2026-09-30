@@ -1,0 +1,54 @@
+# Copyright (c) 2026 Takayuki Nagata
+# SPDX-License-Identifier: MIT
+
+name: PSRAM Controller CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Check, simulate and build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Same toolchain versions as VUX9K, the main user of this IP
+      - name: Setup OSS CAD Suite (Yosys, nextpnr, Icarus, Verilator)
+        uses: YosysHQ/setup-oss-cad-suite@v3
+        with:
+          version: '2026-08-21'
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Cache Veryl Binary
+        id: cache-veryl
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/veryl
+          key: ${{ runner.os }}-veryl-v0.21.0-locked
+
+      - name: Install Veryl
+        if: steps.cache-veryl.outputs.cache-hit != 'true'
+        run: cargo install veryl --version 0.21.0 --locked
+
+      - name: Veryl format and check
+        run: make check
+
+      - name: Lint (Verilator)
+        run: make lint
+
+      - name: Demo smoke simulation
+        run: make sim-demo
+
+      - name: Synthesis, place and route at 27 MHz (5 seeds)
+        run: make sta
