@@ -30,7 +30,8 @@ DEMO_DIR       := demo/tangnano9k
 DEMO_BUILD_DIR := $(BUILD_DIR)/demo
 DEMO_VERYL_DIR := $(DEMO_BUILD_DIR)/veryl
 DEMO_SIM_DIR   := $(DEMO_BUILD_DIR)/sim
-DEMO_SYNTH_DIR := $(DEMO_BUILD_DIR)/synth
+DEMO_CLK_MHZ   ?= 27
+DEMO_SYNTH_DIR := $(DEMO_BUILD_DIR)/synth_$(DEMO_CLK_MHZ)mhz
 CST_FILE       := $(DEMO_DIR)/tangnano9k.cst
 
 .PHONY: all setup fmt check lint eqy formal test test-sim veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
@@ -87,7 +88,8 @@ DEMO_SRCS := $(DEMO_IP_SRCS) \
              $(DEMO_VERYL_DIR)/uart/uart_rx.sv \
              $(DEMO_VERYL_DIR)/uart/uart_tx.sv \
              $(DEMO_VERYL_DIR)/uart/uart_controller.sv \
-             $(DEMO_VERYL_DIR)/psram_top.sv
+             $(DEMO_VERYL_DIR)/psram_top.sv \
+             $(DEMO_VERYL_DIR)/psram_board.sv
 
 # Controller IP sources, compilation order (packages first)
 IP_SRCS := $(VERYL_OUT_DIR)/rtl/psram_pkg.sv \
@@ -129,15 +131,17 @@ test: check lint formal test-sim sim-demo
 # ===== Demo: RTL smoke simulation (Icarus Verilog) =====
 sim-demo: $(DEMO_VERYL_DIR)/.stamp
 	@mkdir -p $(DEMO_SIM_DIR)
-	$(IVERILOG) -g2012 -o $(DEMO_SIM_DIR)/tb_psram_top $(DEMO_SRCS) sim/model/w955d8mbya_die.sv sim/model/w955d8mbya_model.sv $(DEMO_DIR)/tb_psram_top.sv
+	$(IVERILOG) -g2012 -s tb_psram_top -o $(DEMO_SIM_DIR)/tb_psram_top $(DEMO_SRCS) sim/model/w955d8mbya_die.sv sim/model/w955d8mbya_model.sv $(DEMO_DIR)/tb_psram_top.sv
 	$(VVP) $(DEMO_SIM_DIR)/tb_psram_top
 
 # ===== Demo: synthesis, place and route, bitstream =====
+# DEMO_CLK_MHZ=27: crystal; 18: rPLL, the clock VUX9K uses
 $(DEMO_SYNTH_DIR)/psram.json: $(DEMO_VERYL_DIR)/.stamp
 	@mkdir -p $(DEMO_SYNTH_DIR)
 	$(YOSYS) -p "\
 		read_verilog -sv $(DEMO_SRCS); \
-		synth_gowin -top psram_top -nowidelut -no-rw-check -json $@; \
+		chparam -set CLK_MHZ $(DEMO_CLK_MHZ) psram_board; \
+		synth_gowin -top psram_board -nowidelut -no-rw-check -json $@; \
 	"
 
 synth: $(DEMO_SYNTH_DIR)/psram.json
@@ -176,9 +180,9 @@ prog-sram: $(DEMO_SYNTH_DIR)/pack.fs
 	@echo "=== Programming Tang Nano 9K SRAM (Flash write is strictly prohibited) ==="
 	$(OPENFPGALOADER) -b tangnano9k $<
 
-# Automated hardware verification via $(SERIAL_PORT)
+# Automated hardware verification via $(SERIAL_PORT) (the full 8 MB test takes ~20 s)
 test-hw: $(DEMO_SYNTH_DIR)/pack.fs
-	$(PYTHON) $(DEMO_DIR)/run_hardware_test.py --port $(SERIAL_PORT) --baud 115200 \
+	$(PYTHON) $(DEMO_DIR)/run_hardware_test.py --port $(SERIAL_PORT) --baud 115200 --timeout 60 \
 		--prog-cmd "$(OPENFPGALOADER) -b tangnano9k $<"
 
 clean:

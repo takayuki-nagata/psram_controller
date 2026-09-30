@@ -28,7 +28,9 @@ module tb_psram_top;
 
     // DUT: psram_top
     psram_top #(
-        .DIAG_CYCLES(4)
+        .DIAG_CYCLES(4),
+        .FULL_WORDS(256),
+        .CLK_HZ(27_000_000)
     ) dut (
         .clk            (clk            ),
         .rst_n          (rst_n          ),
@@ -96,12 +98,13 @@ module tb_psram_top;
         join_any
 
         $display("\n[TB] Checking final LED status: 6'b%b", led);
+        if (psram_inst.error_count != 0)
+            $fatal(1, "[TB] FAILURE: the PSRAM model reported %0d violation(s)", psram_inst.error_count);
         if (led == 6'b000000) begin
             $display("[TB] SUCCESS: All LEDs ON -> PSRAM verification passed!");
             $finish(0);
         end else begin
-            $display("[TB] FAILURE: LEDs indicate error state: 6'b%b", led);
-            $finish(1);
+            $fatal(1, "[TB] FAILURE: LEDs indicate error state: 6'b%b", led);
         end
     end
 

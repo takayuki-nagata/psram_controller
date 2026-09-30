@@ -1,0 +1,81 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Tang Nano 9K board top of the PSRAM self-test: psram_top runs either directly from the
+// 27 MHz crystal or at 18 MHz from the rPLL (27 MHz x 2 / 3, as in VUX9K).
+pub module psram_board #(
+    param CLK_MHZ: u32 = 27, // 27: crystal, 18: rPLL
+) (
+    clk  : input 'osc clock          , // 27 MHz crystal
+    rst_n: input 'osc reset_async_low, // S1 button
+    btn  : input 'sys logic          , // S2 button: run the test again
+
+    uart_tx: output 'sys logic   ,
+    uart_rx: input  'sys logic   ,
+    led    : output 'sys logic<6>,
+
+    O_psram_ck     : output 'sys logic    <2> ,
+    O_psram_ck_n   : output 'sys logic    <2> ,
+    O_psram_cs_n   : output 'sys logic    <2> ,
+    O_psram_reset_n: output 'sys logic    <2> ,
+    IO_psram_dq    : inout  'sys tri logic<16>,
+    IO_psram_rwds  : inout  'sys tri logic<2> ,
+) {
+    var sys_clk : 'sys clock          ;
+    var pll_lock: 'sys logic          ;
+    var sys_rst : 'sys reset_async_low;
+
+    if CLK_MHZ == 18 :g_clk {
+        unsafe (cdc) {
+            inst u_pll: $sv::rPLL #(
+                FCLKIN   : "27"      ,
+                IDIV_SEL : 2         ,
+                FBDIV_SEL: 1         ,
+                ODIV_SEL : 48        ,
+                DEVICE   : "GW1NR-9C",
+            ) (
+                CLKIN   : clk     ,
+                CLKFB   : 1'b0    ,
+                RESET   : 1'b0    ,
+                RESET_P : 1'b0    ,
+                FBDSEL  : 6'd0    ,
+                IDSEL   : 6'd0    ,
+                ODSEL   : 6'd0    ,
+                PSDA    : 4'd0    ,
+                DUTYDA  : 4'd0    ,
+                FDLY    : 4'd0    ,
+                CLKOUT  : sys_clk ,
+                LOCK    : pll_lock,
+                CLKOUTP : _       ,
+                CLKOUTD : _       ,
+                CLKOUTD3: _       ,
+            );
+        }
+    } else {
+        unsafe (cdc) {
+            assign sys_clk  = clk;
+            assign pll_lock = 1'b1;
+        }
+    }
+
+    unsafe (cdc) {
+        assign sys_rst = rst_n & pll_lock;
+    }
+
+    inst u_top: psram_top #(
+        CLK_HZ: CLK_MHZ * 1_000_000,
+    ) (
+        clk            : sys_clk,
+        rst_n          : sys_rst,
+        btn                     ,
+        uart_tx                 ,
+        uart_rx                 ,
+        led                     ,
+        O_psram_ck              ,
+        O_psram_ck_n            ,
+        O_psram_cs_n            ,
+        O_psram_reset_n         ,
+        IO_psram_dq             ,
+        IO_psram_rwds           ,
+    );
+}

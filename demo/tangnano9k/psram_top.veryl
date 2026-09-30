@@ -1,14 +1,18 @@
 // Copyright (c) 2026 Takayuki Nagata
 // SPDX-License-Identifier: MIT
 
-// Tang Nano 9K PSRAM Test Top-Level Module
-// Runs ID0 register read diagnostic with 64-cycle real-time pin trace
-// Followed by read/write verification test on internal Winbond W955D8MBYA PSRAM
-// Outputs results to UART (115200 baud, 8N1) and on-board 6x LEDs
+// Tang Nano 9K PSRAM self-test
+// 1. ID0 register read with a 64-cycle real-time pin trace
+// 2. Four words written, then read back
+// 3. Full memory test over FULL_WORDS words (default: all 8 MB): write f(addr), then read
+//    f(addr) and write ~f(addr), then read ~f(addr) (every bit of every word both ways)
+// Results on the UART (115200 baud, 8N1) and the on-board LEDs.
 pub module psram_top #(
-    param DIAG_CYCLES: u32 = 64,
+    param CLK_HZ     : u32 = 27_000_000, // clk frequency
+    param DIAG_CYCLES: u32 = 64        ,
+    param FULL_WORDS : u32 = 1 << 21   , // 32-bit words covered by the full memory test
 ) (
-    clk  : input clock          , // 27MHz On-Board Oscillator
+    clk  : input clock          , // System clock (CLK_HZ)
     rst_n: input reset_async_low, // S1 Button (Hardware Reset, active-low)
     btn  : input logic          , // S2 Button (Trigger re-test, active-low)
 
@@ -39,7 +43,9 @@ pub module psram_top #(
     var psram_init_done : logic    ;
     var psram_dbg_sample: logic<32>;
 
-    inst u_psram_ctrl: psram::psram_controller (
+    inst u_psram_ctrl: psram::psram_controller #(
+        CLK_HZ  ,
+    ) (
         clk            : clk             ,
         rst_n          : rst_n           ,
         req_valid      : psram_req       ,
@@ -78,14 +84,14 @@ pub module psram_top #(
         active : tracer_active   ,
     );
 
-    // UART Controller (27MHz / 115200 = 234)
+    // UART controller (115200 baud)
     var uart_wdata: logic<8>;
     var uart_we   : logic   ;
     var uart_full : logic   ;
 
     inst u_uart: uart_controller #(
-        CNT  : 234,
-        CSIZE: 10 ,
+        CNT  : CLK_HZ / 115200,
+        CSIZE: 10             ,
     ) (
         clk      : clk       ,
         rst      : rst_n     ,
@@ -118,6 +124,8 @@ pub module psram_top #(
         READ_REQ,
         READ_WAIT,
         VERIFY,
+        FULL_REQ,
+        FULL_WAIT,
         PRINT_START,
         PRINT_CHAR,
         DONE_LOOP,
@@ -134,8 +142,16 @@ pub module psram_top #(
     var cur_msg_char    : logic    <8> ;
     var err_expected    : logic    <32>;
     var err_got         : logic    <32>;
-    var cur_nibble      : logic    <4> ;
-    var hex_char        : logic    <8> ;
+    var err_addr        : logic    <24>;
+
+    // Full memory test: pass 0 writes f(w), pass 1 reads f(w) and writes ~f(w), pass 2
+    // reads ~f(w); w is the 32-bit word index. f is unique per word and varies all 32 bits.
+    var full_pass : logic<2> ;
+    var full_word : logic<21>;
+    var full_write: logic    ; // pass 1: the write after the read of the same word
+    let full_f    : logic<32> = {full_word[10:0], full_word} ^ 32'hA5C3_96E1;
+    var cur_nibble: logic<4> ;
+    var hex_char  : logic<8> ;
 
     // Diagnostic Print Indexing
     var diag_cyc_idx   : logic<6>; // 0 to 63
@@ -180,6 +196,12 @@ pub module psram_top #(
             6'd34  : cur_nibble = err_got[11:8];
             6'd35  : cur_nibble = err_got[7:4];
             6'd36  : cur_nibble = err_got[3:0];
+            6'd40  : cur_nibble = err_addr[23:20];
+            6'd41  : cur_nibble = err_addr[19:16];
+            6'd42  : cur_nibble = err_addr[15:12];
+            6'd43  : cur_nibble = err_addr[11:8];
+            6'd44  : cur_nibble = err_addr[7:4];
+            6'd45  : cur_nibble = err_addr[3:0];
             default: cur_nibble = 4'd0;
         }
 
@@ -302,7 +324,7 @@ pub module psram_top #(
                 default: cur_msg_char = 8'h00;
             }
         } else {
-            // Message FAIL: "\r\n[PSRAM] FAIL! E=XXXXXXXX G=YYYYYYYY\r\n" (39 bytes)
+            // Message FAIL: "\r\n[PSRAM] FAIL! E=XXXXXXXX G=YYYYYYYY A=ZZZZZZ\r\n" (48 bytes)
             case print_idx {
                 6'd0   : cur_msg_char = 8'h0D;
                 6'd1   : cur_msg_char = 8'h0A;
@@ -341,8 +363,17 @@ pub module psram_top #(
                 6'd34  : cur_msg_char = hex_char;
                 6'd35  : cur_msg_char = hex_char;
                 6'd36  : cur_msg_char = hex_char;
-                6'd37  : cur_msg_char = 8'h0D;
-                6'd38  : cur_msg_char = 8'h0A;
+                6'd37  : cur_msg_char = 8'h20;
+                6'd38  : cur_msg_char = 8'h41; // A
+                6'd39  : cur_msg_char = 8'h3D; // =
+                6'd40  : cur_msg_char = hex_char;
+                6'd41  : cur_msg_char = hex_char;
+                6'd42  : cur_msg_char = hex_char;
+                6'd43  : cur_msg_char = hex_char;
+                6'd44  : cur_msg_char = hex_char;
+                6'd45  : cur_msg_char = hex_char;
+                6'd46  : cur_msg_char = 8'h0D;
+                6'd47  : cur_msg_char = 8'h0A;
                 default: cur_msg_char = 8'h00;
             }
         }
@@ -442,7 +473,21 @@ pub module psram_top #(
     }
 
     // LED drive
-    assign led = if test_pass ? 6'b000000 : (if test_fail ? 6'b111110 : ~{3'b000, test_idx});
+    // LEDs (active Low): all on = pass, one off = fail; during the full test the pass
+    // number and the top address bits show progress
+    assign led = if test_pass ?
+        6'b000000
+    :
+        (if test_fail ?
+            6'b111110
+        :
+            (if test_state == TestState::FULL_REQ || test_state == TestState::FULL_WAIT ?
+                ~{full_pass, full_word[20:17]}
+            :
+                ~{3'b000, test_idx}
+            )
+        )
+    ;
 
     assign tracer_raddr = diag_cyc_idx;
 
@@ -456,6 +501,10 @@ pub module psram_top #(
             msg_len         = 6'd0;
             err_expected    = 32'd0;
             err_got         = 32'd0;
+            err_addr        = 24'd0;
+            full_pass       = 2'd0;
+            full_word       = 21'd0;
+            full_write      = 1'b0;
             psram_req       = 1'b0;
             psram_we        = 1'b0;
             psram_addr      = 24'd0;
@@ -597,20 +646,61 @@ pub module psram_top #(
                     if psram_rdata != cur_test_pattern {
                         err_expected = cur_test_pattern;
                         err_got      = psram_rdata;
+                        err_addr     = cur_test_addr;
                         test_fail    = 1'b1;
                         test_state   = TestState::PRINT_START;
                     } else if test_idx == 3'd3 {
-                        test_pass  = 1'b1;
-                        test_state = TestState::PRINT_START;
+                        full_pass  = 2'd0;
+                        full_word  = 21'd0;
+                        full_write = 1'b0;
+                        test_state = TestState::FULL_REQ;
                     } else {
                         test_idx   += 3'd1;
                         test_state =  TestState::READ_REQ;
                     }
                 }
 
+                TestState::FULL_REQ: {
+                    psram_req   = 1'b1;
+                    psram_addr  = {1'b0, full_word, 2'b00};
+                    psram_we    = full_pass == 2'd0 || full_write;
+                    psram_wdata = if full_pass == 2'd0 ? full_f : ~full_f;
+                    psram_wstrb = 4'b1111;
+                    test_state  = TestState::FULL_WAIT;
+                }
+
+                TestState::FULL_WAIT: {
+                    if psram_ready {
+                        if !psram_we && psram_rdata != (if full_pass == 2'd1 ? full_f : ~full_f) {
+                            err_expected = if full_pass == 2'd1 ? full_f : ~full_f;
+                            err_got      = psram_rdata;
+                            err_addr     = {1'b0, full_word, 2'b00};
+                            test_fail    = 1'b1;
+                            test_state   = TestState::PRINT_START;
+                        } else if full_pass == 2'd1 && !full_write {
+                            full_write = 1'b1;
+                            test_state = TestState::FULL_REQ;
+                        } else {
+                            full_write = 1'b0;
+                            test_state = TestState::FULL_REQ;
+                            if (full_word as u32) == FULL_WORDS - 1 {
+                                full_word = 21'd0;
+                                if full_pass == 2'd2 {
+                                    test_pass  = 1'b1;
+                                    test_state = TestState::PRINT_START;
+                                } else {
+                                    full_pass += 2'd1;
+                                }
+                            } else {
+                                full_word += 21'd1;
+                            }
+                        }
+                    }
+                }
+
                 TestState::PRINT_START: {
                     print_idx  = 6'd0;
-                    msg_len    = if test_pass ? 6'd32 : 6'd39;
+                    msg_len    = if test_pass ? 6'd32 : 6'd48;
                     test_state = TestState::PRINT_CHAR;
                 }
 

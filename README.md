@@ -4,8 +4,8 @@
 [![Hardware: Tang Nano 9K](https://img.shields.io/badge/Hardware-Tang%20Nano%209K-orange.svg)](https://wiki.sipeed.com/hardware/en/tang/Tang-Nano-9K/Nano-9K.html)
 [![Language: Veryl](https://img.shields.io/badge/Language-Veryl%20HDL-green.svg)](https://veryl-lang.org/)
 [![Toolchain: Open--Source](https://img.shields.io/badge/Toolchain-Yosys%20%7C%20nextpnr%20%7C%20Apycula-purple.svg)](https://github.com/YosysHQ/oss-cad-suite-build)
-[![Simulation: PASS](https://img.shields.io/badge/Simulation-100%25%20PASS-brightgreen.svg)](#simulation)
-[![Silicon: Verified](https://img.shields.io/badge/Silicon-100%25%20Verified-brightgreen.svg)](#hardware-verification)
+[![Simulation: PASS](https://img.shields.io/badge/Simulation-100%25%20PASS-brightgreen.svg)](#1-run-the-tests)
+[![Silicon: Verified](https://img.shields.io/badge/Silicon-100%25%20Verified-brightgreen.svg)](#3-run-the-hardware-test)
 
 A clean-room, robust **HyperBus PSRAM Controller** designed for the **Winbond W955D8MBYA** 64Mbit (8MB) PSRAM embedded inside the Gowin GW1NR-9C FPGA on the **Tang Nano 9K** development board.
 
@@ -15,9 +15,9 @@ Written in modern **Veryl HDL**, synthesized with **Yosys**, placed and routed w
 
 ## Key Highlights
 
-- **16-bit DDR Data Bus**: Operates the two internal 32Mb x8 dies in lockstep for 16-bit wide DDR data transfers (27 MT/s at 27 MHz system clock).
-- **Center-Aligned Clocking**: PSRAM CK is registered on `negedge clk`, creating an exact quarter-cycle (18.5 ns) phase shift that provides generous setup and hold margins without complex PLLs or DLLs.
-- **Fixed Latency Mode**: Operates at 2x Fixed Latency (12 PSRAM clock cycles / 24 system cycles), supporting deterministic read and write transactions.
+- **16-bit DDR Data Bus**: Operates the two internal 32Mb x8 dies in lockstep for 16-bit wide DDR data transfers (one CK edge per system clock cycle; `CLK_HZ` parameter, tested at 18 and 27 MHz).
+- **Center-Aligned Clocking**: PSRAM CK is registered on `negedge clk`, so that every CK edge is half a system clock after the data changes, giving generous setup and hold margins without complex PLLs or DLLs.
+- **Fixed Latency Mode**: Operates at 2x Fixed Latency (12 PSRAM clock cycles, counted from the third CA clock), supporting deterministic read and write transactions; register writes with zero latency.
 - **Clean-Room Specification**: Developed strictly from official vendor datasheets (Winbond & Gowin) without proprietary IP dependencies.
 - **Built-in Real-Time Pin Tracer**: Includes an on-chip logic analyzer (`psram_tracer`) that records 64 cycles of physical pin states (CS#, CK, OE, RWDS, DQ, FSM State, Timer) and prints them via UART for instant hardware diagnostics.
 - **100% Open-Source Toolchain**: Fully reproducible using `veryl`, `yosys`, `nextpnr`, `apycula`, `openFPGALoader`, and `iverilog`.
@@ -90,26 +90,34 @@ The two 32Mbit x8 PSRAM dies are packaged in SiP and internally bonded to FPGA B
 ## Directory Structure
 
 ```text
-├── Makefile                   # Veryl, Icarus, Yosys, nextpnr, test-hw automation
+├── Makefile                   # setup, check, lint, formal, test-sim, eqy, sim-demo, bitstream, sta, test-hw
 ├── Veryl.toml                 # Veryl project of the controller IP (rtl/ only)
-├── rtl/                       # Controller IP
-│   ├── psram_pkg.veryl        # Timing parameters & constants
+├── rtl/                       # Controller IP (all Veryl)
+│   ├── psram_pkg.veryl        # Datasheet timing (ns), CA bits, register addresses
 │   ├── psram_core.veryl       # HyperBus protocol FSM
-│   ├── psram_phy.veryl        # Physical layer tri-state & center-aligned clock IO
-│   └── psram_controller.veryl # Top controller wrapper
+│   ├── psram_phy.veryl        # PSRAM clock (falling edge) and DQ/RWDS tri-state buffers
+│   └── psram_controller.veryl # Top: valid/ready host interface, CLK_HZ parameter
 ├── sim/
-│   └── model/
-│       └── tb_psram_model.sv  # W955D8MBYA behavioral simulation model
+│   ├── model/                 # W955D8MBYA model with protocol/timing checkers (2 dies)
+│   ├── tb/                    # cocotb toplevel
+│   ├── tests/                 # cocotb tests and the host driver/protocol monitor
+│   ├── runner.py              # build/run helper (cocotb_tools.runner)
+│   └── test_sim.py            # pytest entry point (18 and 27 MHz)
+├── formal/                    # SymbiYosys properties of psram_core
+├── scripts/                   # run_eqy.py (make eqy), lint.vlt (Verilator waivers)
 ├── demo/tangnano9k/           # Board demo (separate Veryl project using the IP)
 │   ├── Veryl.toml             # Depends on the IP via `psram = { path = "../.." }`
-│   ├── psram_top.veryl        # Self-test diagnostic top module with UART & LED
+│   ├── psram_board.veryl      # Board top: crystal or rPLL (18 MHz) clock
+│   ├── psram_top.veryl        # Self-test: pin trace, full 8 MB memory test, UART & LEDs
 │   ├── psram_tracer.veryl     # 64-sample on-chip logic analyzer
 │   ├── uart/                  # UART transmitter & receiver
-│   ├── tb_psram_top.sv        # Demo smoke-test testbench
+│   ├── tb_psram_top.sv        # Demo simulation testbench
 │   ├── tangnano9k.cst         # Gowin physical pin constraint file
 │   └── run_hardware_test.py   # Hardware UART monitor & pin trace analyzer
-└── docs/
-    └── spec.md                # Technical design specification
+├── docs/
+│   ├── spec.md                # Technical design specification
+│   └── integration.md         # Using the IP from another project (VUX9K)
+└── .github/workflows/ci.yml   # CI: make check, lint, formal, test-sim, sim-demo, sta
 ```
 
 Generated SystemVerilog is not committed. `make veryl` / `make veryl-demo` write it under `build/`
@@ -122,75 +130,68 @@ dependency see its modules with the dependency name as prefix (e.g. `psram_psram
 
 ### Prerequisites
 
-Install the open-source FPGA toolchain:
-- **[Veryl](https://veryl-lang.org/)** (v0.21+): Modern HDL compiler
-- **[OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build)** (includes Yosys, nextpnr-himbaechel, Apycula, openFPGALoader, and Icarus Verilog)
-- **Python 3** (with `pyserial`)
+Install the open-source FPGA toolchain (versions used in CI, same as VUX9K):
+- **[Veryl](https://veryl-lang.org/)** 0.21.0
+- **[OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build)** 2026-08-21 (Yosys, eqy, SymbiYosys, nextpnr-himbaechel, Apycula, openFPGALoader, Icarus Verilog, Verilator)
+- **[uv](https://docs.astral.sh/uv/)**, then `make setup` for the Python environment (cocotb 2.0.1, pytest, pyserial, ruff)
 
-### 1. Run RTL Simulation
-
-```bash
-make sim-demo
-```
-
-This compiles the Veryl sources to SystemVerilog, compiles the testbench with Icarus Verilog, and runs the test against the clean-room W955D8MBYA simulation model.
-
-Expected output:
-```text
-=== Starting PSRAM Controller Simulation ===
-[TB] Reset de-asserted. Waiting for power-up initialization (150us)...
-=== PSRAM TRACE (ID0) ===
-...
-=== END TRACE ===
-[PSRAM] TEST PASSED! 64Mb OK
-[TB] SUCCESS: All LEDs ON -> PSRAM verification passed!
-```
-
-### 2. Build FPGA Bitstream
-
-Synthesize with Yosys, place-and-route with nextpnr, and pack with `gowin_pack`:
+### 1. Run the tests
 
 ```bash
-make bitstream
+make setup     # once
+make test      # check + lint + formal + test-sim + sim-demo
 ```
 
-Generated artifacts will be placed in `build/demo/synth/pack.fs`.
+| Target | What it checks |
+|---|---|
+| `make check` / `make lint` | Veryl format/check, ruff; Verilator `-Wall` on the IP (warnings fatal) |
+| `make formal` | SymbiYosys proofs of `psram_core` ([formal/](formal/)): interface contract, tCSM, bus direction, RESET# |
+| `make test-sim` | cocotb tests ([sim/tests/](sim/tests/)) at 18 and 27 MHz against a datasheet-based W955D8MBYA model ([sim/model/](sim/model/)) that checks the protocol and timing; data is checked through the interface and in the model memory |
+| `make sim-demo` | the board demo in simulation (Icarus Verilog) |
+| `make eqy` | formal equivalence of a refactor against a base commit (`EQY_BASE`, default `HEAD`) |
+| `make sta` | nextpnr timing at 27 MHz, 5 seeds |
 
-### 3. Run Hardware Verification
+### 2. Build the FPGA bitstream
+
+```bash
+make bitstream                  # 27 MHz from the crystal
+make bitstream DEMO_CLK_MHZ=18  # 18 MHz from the rPLL, as in VUX9K
+```
+
+The bitstream is `build/demo/synth_<N>mhz/pack.fs`.
+
+### 3. Run the hardware test
 
 Connect the Tang Nano 9K board via USB and run:
 
 ```bash
-make test-hw
+make test-hw                    # or: make test-hw DEMO_CLK_MHZ=18
 ```
 
 This command:
-1. Programs `pack.fs` directly into the FPGA **SRAM** (volatile; never touches SPI Flash).
+1. Programs `pack.fs` into the FPGA **SRAM** (volatile; never touches the SPI Flash).
 2. Listens to the USB serial port (`/dev/ttyUSB3` by default at 115200 baud; override with `make test-hw SERIAL_PORT=/dev/ttyUSBx`).
-3. Automatically parses the real-time logic analyzer trace and verifies the memory read/write patterns.
+3. The board reads ID0 with a 64-cycle pin trace, writes and reads back four words, then runs
+   the full memory test over all 8 MB (write f(addr); read f(addr) and write ~f(addr); read
+   ~f(addr)), about 12 s at 27 MHz and 19 s at 18 MHz. A failure prints the expected and read
+   value and the address. The script parses the trace and reports the result.
 
-Example hardware output:
+Excerpt of the hardware output (read of ID0: the chip drives the first byte with RWDS High
+on the rising CK edge of clock 15, the controller samples it in READ_DATA cycle 1 and the
+second byte in cycle 2):
 ```text
-=== FPGA configured! Listening for PSRAM test output... ===
 === PSRAM TRACE (ID0) ===
 CYC: S TM C K OE RW D1 D0
 C00: 2 00 1 0 0 11 FF FF
 C01: 3 00 0 0 1 11 E0 E0
 ...
-C1E: 4 16 0 1 0 11 00 00
-C1F: 6 00 0 0 0 00 5F 5F
+C1E: 6 01 0 1 0 11 00 00
+C1F: 6 02 0 0 0 00 5F 5F
+C20: 6 03 0 0 0 00 5F 5F
 ...
 === END TRACE ===
 
 [PSRAM] TEST PASSED! 64Mb OK
-
-=================================================================
-            REAL-TIME PIN TRACE ANALYSIS REPORT
-=================================================================
-[*] CHIP RESPONSE DETECTED! First response at cycle 8
-[+] Winbond PSRAM ID0 match confirmed (0x5F / Winbond 32Mb die)!
-[*] RWDS was driven High for 26 cycles (indicates 2x Fixed Latency mode).
-=================================================================
 >>> SUCCESS: PSRAM Hardware Read/Write Test PASSED on Tang Nano 9K! <<<
 ```
 
