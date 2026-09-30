@@ -44,8 +44,8 @@ module tb_psram_top;
         .IO_psram_rwds  (IO_psram_rwds  )
     );
 
-    // HyperRAM Simulation Model
-    tb_psram_model psram_inst (
+    // W955D8MBYA model (sim/model/)
+    w955d8mbya_model psram_inst (
         .ck     (O_psram_ck     ),
         .ck_n   (O_psram_ck_n   ),
         .cs_n   (O_psram_cs_n   ),

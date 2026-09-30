@@ -233,6 +233,9 @@ module w955d8mbya_die #(
 
     always @(posedge cs_n) begin
         t_cs_rise = $realtime;
+        // A hardware reset aborts the transaction; RESET# may fall in the same time step
+        #0.001;
+        if (reset_n !== 1'b1) active = 1'b0;
         if (active) begin
             if (ck !== 1'b0) fail("CS# raised while CK is High");
             if ($realtime - t_cs_fall > T_CSM) fail("tCSM violated (CS# Low longer than 4 us)");

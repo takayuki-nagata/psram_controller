@@ -111,7 +111,7 @@ test: check lint test-sim sim-demo
 # ===== Demo: RTL smoke simulation (Icarus Verilog) =====
 sim-demo: $(DEMO_VERYL_DIR)/.stamp
 	@mkdir -p $(DEMO_SIM_DIR)
-	$(IVERILOG) -g2012 -o $(DEMO_SIM_DIR)/tb_psram_top $(DEMO_SRCS) sim/model/tb_psram_model.sv $(DEMO_DIR)/tb_psram_top.sv
+	$(IVERILOG) -g2012 -o $(DEMO_SIM_DIR)/tb_psram_top $(DEMO_SRCS) sim/model/w955d8mbya_die.sv sim/model/w955d8mbya_model.sv $(DEMO_DIR)/tb_psram_top.sv
 	$(VVP) $(DEMO_SIM_DIR)/tb_psram_top
 
 # ===== Demo: synthesis, place and route, bitstream =====

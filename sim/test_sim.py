@@ -15,19 +15,9 @@ CLK_MHZ = [18, 27]
 
 # Known controller bugs, found by these tests; strict, so fixing one fails the run until
 # its entry is removed here.
-DATA_PHASE_LATE = "data phase one PSRAM clock late (latency counted from the 3rd CA clock)"
-ADDR_MAP = "die word address is addr[21:1] instead of addr[22:2]"
 REG_WRITE = "register writes use the memory write latency instead of zero latency"
 KNOWN_BUGS = {
-    "test_id_registers": ADDR_MAP,
-    "test_cr0_write": f"{REG_WRITE}; {ADDR_MAP}",
-    "test_write_strobes": DATA_PHASE_LATE,
-    "test_address_walk": f"{DATA_PHASE_LATE}; {ADDR_MAP}",
-    "test_neighbours": DATA_PHASE_LATE,
-    "test_boundaries": DATA_PHASE_LATE,
-    "test_random": DATA_PHASE_LATE,
-    "test_back_to_back": DATA_PHASE_LATE,
-    "test_reset_during_access": DATA_PHASE_LATE,
+    "test_cr0_write": REG_WRITE,
 }
 
 TESTS = [

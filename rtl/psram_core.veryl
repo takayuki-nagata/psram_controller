@@ -90,8 +90,9 @@ pub module psram_core (
     }
 
     // 48-bit Command-Address packet (W955D8MBYA Table 2 & Table 5)
-    // Word address = addr[22:1]
-    let word_addr: logic<22> = addr[22:1];
+    // Each 32-bit host word is one 16-bit word in each of the two x8 dies (die 0: DQ[7:0],
+    // die 1: DQ[15:8]), so the 21-bit die word address (A20..A0) is addr[22:2].
+    let word_addr: logic<21> = addr[22:2];
     let is_reg   : logic     = addr[23];
     let ca_packet: logic<48> = {
         if we ? 1'b0 : 1'b1, // CA[47]: 1: Read, 0: Write
@@ -104,7 +105,11 @@ pub module psram_core (
         word_addr[2:0], // CA[2:0]: Lower Column
     };
 
-    // Fixed latency mode: 12 PSRAM clocks = 24 half-cycles (system cycles)
+    // Fixed latency mode: 12 PSRAM clocks = 24 half-cycles (system cycles).
+    // The latency count starts with the third CA clock (datasheet Figures 9 and 11), so
+    // with the CA taking clocks 1..3 the first data word is transferred on clock 15.
+    // WAIT_LATENCY starts after the first rising edge of clock 4; with timer = t in
+    // WAIT_LATENCY the next CK edge is the rising edge of clock 15 when t = LATENCY_CYCLES - 3.
     const LATENCY_CYCLES: logic<16> = 16'd24;
 
     always_ff (clk, rst_n) {
@@ -224,14 +229,16 @@ pub module psram_core (
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
 
-                    // Drive RWDS low 1 cycle before write data starts as preamble
-                    if r_we && (timer >= (LATENCY_CYCLES - 16'd2)) {
+                    // RWDS preamble: Low for one PSRAM clock before the write data
+                    // (datasheet Figure 11 note 3)
+                    if r_we && (timer >= (LATENCY_CYCLES - 16'd6)) {
                         r_rwds_oe  = 1'b1;
                         r_rwds_out = 2'b00;
                     }
 
                     if r_we {
-                        if timer >= (LATENCY_CYCLES - 16'd1) {
+                        // Word 0 is captured on the rising edge of clock 15
+                        if timer >= (LATENCY_CYCLES - 16'd3) {
                             timer      = 16'd0;
                             r_dq_oe    = 1'b1;
                             r_dq_out   = r_wdata[15:0];
@@ -240,7 +247,8 @@ pub module psram_core (
                             state      = State::WRITE_DATA;
                         }
                     } else {
-                        if timer >= (LATENCY_CYCLES - 16'd2) {
+                        // The rising edge of clock 15 (next cycle) launches read word 0
+                        if timer >= (LATENCY_CYCLES - 16'd4) {
                             timer   = 16'd0;
                             r_dq_oe = 1'b0;
                             state   = State::READ_DATA;
@@ -273,17 +281,23 @@ pub module psram_core (
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
 
-                    // Cycle 1 (timer==1): PSRAM CK rose, samples Word 0
-                    // Cycle 2 (timer==2): PSRAM CK fell, samples Word 1, read transaction finished
+                    // timer 0: CK rises (clock 15), the PSRAM launches word 0
+                    // timer 1: sample word 0 (half a system cycle after the CK edge); CK falls
+                    // timer 2: sample word 1; stop CK
+                    // timer 3: raise CS#; it stayed Low one more cycle so that the last word
+                    //          is still driven when sampled (datasheet Table 14 note 3)
                     if timer == 16'd1 {
                         r_rdata[15:0] = dq_in;
-                    } else if timer >= 16'd2 {
+                    } else if timer == 16'd2 {
                         r_rdata[31:16] = dq_in;
-                        r_cs_n         = 1'b1; // De-assert CS#
                         r_ck_en        = 1'b0;
                         r_ck           = 1'b0;
-                        timer          = 16'd0;
-                        state          = State::RECOVERY;
+                    } else if timer >= 16'd3 {
+                        r_cs_n  = 1'b1; // De-assert CS#
+                        r_ck_en = 1'b0;
+                        r_ck    = 1'b0;
+                        timer   = 16'd0;
+                        state   = State::RECOVERY;
                     }
                 }
 
