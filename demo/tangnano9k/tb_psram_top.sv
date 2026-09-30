@@ -71,7 +71,7 @@ module tb_psram_top;
 
     // Test sequence
     initial begin
-        $dumpfile("build/sim/tb.vcd");
+        $dumpfile("build/demo/sim/tb.vcd");
         $dumpvars(0, tb_psram_top);
         $display("=== Starting PSRAM Controller Simulation ===");
         rst_n   = 1'b0;

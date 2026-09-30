@@ -1,7 +1,7 @@
 # Build artifacts
 build/
 .build/
-psram_controller.f
+*.f
 
 # Simulation & synthesis output
 *.vcd
@@ -18,8 +18,6 @@ __pycache__/
 *.swp
 *~
 
-# Veryl generated outputs
-/dependencies/
+# Veryl toolchain cache and fetched dependencies (outputs go to build/ via --out-dir)
+dependencies/
 *.sv.map
-/src/**/*.sv
-!/src/psram_phy_io.sv

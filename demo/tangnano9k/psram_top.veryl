@@ -38,7 +38,7 @@ pub module psram_top #(
     var psram_busy      : logic    ;
     var psram_dbg_sample: logic<32>;
 
-    inst u_psram_ctrl: psram_controller (
+    inst u_psram_ctrl: psram::psram_controller (
         clk            : clk             ,
         rst_n          : rst_n           ,
         req            : psram_req       ,

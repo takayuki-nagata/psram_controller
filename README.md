@@ -83,37 +83,38 @@ The two 32Mbit x8 PSRAM dies are packaged in SiP and internally bonded to FPGA B
 | `IO_psram_dq[7:0]` | Inout | `IOL2B..IOL17B` | 8-bit DDR Data Bus for Die 0 |
 | `IO_psram_dq[15:8]` | Inout | `IOL18B..IOL27A` | 8-bit DDR Data Bus for Die 1 |
 
-*Complete pin mappings are specified in [`tangnano9k.cst`](tangnano9k.cst) and documented in [`docs/spec.md`](docs/spec.md).*
+*Complete pin mappings are specified in [`tangnano9k.cst`](demo/tangnano9k/tangnano9k.cst) and documented in [`docs/spec.md`](docs/spec.md).*
 
 ---
 
 ## Directory Structure
 
 ```text
-├── .gitignore               # Git ignore patterns
-├── LICENSE                  # MIT License
-├── Makefile                 # Automation for Veryl, Icarus, Yosys, nextpnr, test-hw
-├── README.md                # Project documentation
-├── Veryl.toml               # Veryl project configuration
-├── docs/
-│   └── spec.md              # Technical design specification
-├── scripts/
-│   └── run_hardware_test.py # Hardware UART monitor & pin trace analyzer
-├── sim/
-│   ├── tb_psram_model.sv    # Clean-room W955D8MBYA behavioral simulation model
-│   └── tb_psram_top.sv      # Top-level testbench
-├── src/
-│   ├── psram_controller.veryl # Top controller wrapper
+├── Makefile                   # Veryl, Icarus, Yosys, nextpnr, test-hw automation
+├── Veryl.toml                 # Veryl project of the controller IP (rtl/ only)
+├── rtl/                       # Controller IP
+│   ├── psram_pkg.veryl        # Timing parameters & constants
 │   ├── psram_core.veryl       # HyperBus protocol FSM
 │   ├── psram_phy_io.sv        # Physical layer tri-state & center-aligned clock IO
-│   ├── psram_pkg.veryl        # Timing parameters & constants
+│   └── psram_controller.veryl # Top controller wrapper
+├── sim/
+│   └── model/
+│       └── tb_psram_model.sv  # W955D8MBYA behavioral simulation model
+├── demo/tangnano9k/           # Board demo (separate Veryl project using the IP)
+│   ├── Veryl.toml             # Depends on the IP via `psram = { path = "../.." }`
 │   ├── psram_top.veryl        # Self-test diagnostic top module with UART & LED
 │   ├── psram_tracer.veryl     # 64-sample on-chip logic analyzer
-│   └── uart/                  # Modular UART transmitter & receiver
-└── tangnano9k.cst           # Gowin physical pin constraint file
+│   ├── uart/                  # UART transmitter & receiver
+│   ├── tb_psram_top.sv        # Demo smoke-test testbench
+│   ├── tangnano9k.cst         # Gowin physical pin constraint file
+│   └── run_hardware_test.py   # Hardware UART monitor & pin trace analyzer
+└── docs/
+    └── spec.md                # Technical design specification
 ```
 
-SystemVerilog files generated from `.veryl` sources (and the Veryl standard library under `dependencies/`) are not committed; they are produced by `make veryl` (invoked automatically by `make sim` / `make bitstream`).
+Generated SystemVerilog is not committed. `make veryl` / `make veryl-demo` write it under `build/`
+(invoked automatically by `make sim-demo` / `make bitstream`). Projects using the IP as a Veryl
+dependency see its modules with the dependency name as prefix (e.g. `psram_psram_controller`).
 
 ---
 
@@ -129,7 +130,7 @@ Install the open-source FPGA toolchain:
 ### 1. Run RTL Simulation
 
 ```bash
-make sim
+make sim-demo
 ```
 
 This compiles the Veryl sources to SystemVerilog, compiles the testbench with Icarus Verilog, and runs the test against the clean-room W955D8MBYA simulation model.
@@ -153,7 +154,7 @@ Synthesize with Yosys, place-and-route with nextpnr, and pack with `gowin_pack`:
 make bitstream
 ```
 
-Generated artifacts will be placed in `build/synth/pack.fs`.
+Generated artifacts will be placed in `build/demo/synth/pack.fs`.
 
 ### 3. Run Hardware Verification
 
