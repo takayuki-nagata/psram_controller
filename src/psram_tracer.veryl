@@ -1,0 +1,67 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Hardware Logic Analyzer / Signal Tracer for Tang Nano 9K PSRAM Controller
+// Captures 64 cycles of 32-bit debug signals upon trigger
+pub module psram_tracer (
+    clk    : input  clock              ,
+    rst_n  : input  reset_async_low    ,
+    trigger: input  logic              , // 1-cycle pulse or level to start capture
+    sample : input  logic          <32>, // 32-bit debug signals to sample every cycle
+    raddr  : input  logic          <6> , // Read address (0 to 63)
+    rdata  : output logic          <32>, // Sampled 32-bit data at raddr
+    done   : output logic              , // 1 when 64 cycles have been captured
+    active : output logic              , // 1 while capturing
+) {
+    var mem      : logic<32> [64];
+    var waddr    : logic<6>      ;
+    var r_done   : logic         ;
+    var r_act    : logic         ;
+    var mem_we   : logic         ;
+    var mem_wdata: logic<32>     ;
+    var mem_waddr: logic<6>      ;
+
+    assign rdata  = mem[raddr];
+    assign done   = r_done;
+    assign active = r_act;
+
+    // RAM write port (synchronous RAM without reset)
+    always_ff (clk) {
+        if mem_we {
+            mem[mem_waddr] = mem_wdata;
+        }
+    }
+
+    // Capture control logic with reset
+    always_ff (clk, rst_n) {
+        if_reset {
+            waddr     = 6'd0;
+            r_done    = 1'b0;
+            r_act     = 1'b0;
+            mem_we    = 1'b0;
+            mem_waddr = 6'd0;
+            mem_wdata = 32'd0;
+        } else {
+            mem_we    = 1'b0;
+            mem_wdata = sample;
+
+            if !r_act {
+                if trigger && !r_done {
+                    r_act     = 1'b1;
+                    waddr     = 6'd0;
+                    mem_we    = 1'b1;
+                    mem_waddr = 6'd0;
+                }
+            } else {
+                if waddr == 6'd63 {
+                    r_act  = 1'b0;
+                    r_done = 1'b1;
+                } else {
+                    waddr     += 6'd1;
+                    mem_we    =  1'b1;
+                    mem_waddr =  waddr + 6'd1;
+                }
+            }
+        }
+    }
+}

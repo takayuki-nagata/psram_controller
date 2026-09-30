@@ -1,0 +1,309 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Core HyperBus protocol FSM for Tang Nano 9K internal PSRAM (Winbond W955D8MBYA)
+// Clean-room implementation based on official datasheets
+pub module psram_core (
+    clk  : input clock          , // System clock: 27MHz
+    rst_n: input reset_async_low,
+
+    // Host / User Bus Interface
+    req  : input  logic    ,
+    we   : input  logic    , // 1: Write, 0: Read
+    addr : input  logic<24>, // Byte address (bit 23: 0=Memory Space, 1=Register Space)
+    wdata: input  logic<32>, // 32-bit write word
+    wstrb: input  logic<4> , // Byte write mask (1: write, 0: mask)
+    rdata: output logic<32>, // 32-bit read word
+    ready: output logic    , // 1-cycle pulse when transaction completes
+    busy : output logic    , // 1: controller busy
+
+    // Physical Interface to psram_phy_io
+    psram_ck_reg: output logic    ,
+    ck_en       : output logic    ,
+    cs_n_out    : output logic<2> ,
+    reset_n_out : output logic<2> ,
+    dq_oe       : output logic    ,
+    dq_out      : output logic<16>,
+    dq_in       : input  logic<16>,
+    rwds_oe     : output logic    ,
+    rwds_out    : output logic<2> ,
+    rwds_in     : input  logic<2> ,
+    dbg_state   : output logic<4> ,
+    dbg_timer   : output logic<6> ,
+) {
+    enum State {
+        RESET_ASSERT,
+        RESET_WAIT,
+        IDLE,
+        SEND_CA,
+        WAIT_LATENCY,
+        WRITE_DATA,
+        READ_DATA,
+        RECOVERY,
+    }
+
+    var state     : State    ;
+    var timer     : logic<16>;
+    var ca_shift  : logic<48>;
+    var r_we      : logic    ;
+    var r_wdata   : logic<32>;
+    var r_wstrb   : logic<4> ;
+    var r_rdata   : logic<32>;
+    var r_ready   : logic    ;
+    var r_cs_n    : logic    ;
+    var r_reset_n : logic    ;
+    var r_ck      : logic    ;
+    var r_ck_en   : logic    ;
+    var r_dq_oe   : logic    ;
+    var r_dq_out  : logic<16>;
+    var r_rwds_oe : logic    ;
+    var r_rwds_out: logic<2> ;
+
+    assign ready        = r_ready;
+    assign rdata        = r_rdata;
+    assign busy         = state != State::IDLE;
+    assign psram_ck_reg = r_ck;
+    assign ck_en        = r_ck_en;
+    assign cs_n_out     = {r_cs_n, r_cs_n};
+    assign reset_n_out  = {r_reset_n, r_reset_n};
+    assign dq_oe        = r_dq_oe;
+    assign dq_out       = r_dq_out;
+    assign rwds_oe      = r_rwds_oe;
+    assign rwds_out     = r_rwds_out;
+    assign dbg_timer    = timer[5:0];
+
+    var dbg_state_r: logic<4>;
+    assign dbg_state = dbg_state_r;
+
+    always_comb {
+        case state {
+            State::RESET_ASSERT: dbg_state_r = 4'd0;
+            State::RESET_WAIT  : dbg_state_r = 4'd1;
+            State::IDLE        : dbg_state_r = 4'd2;
+            State::SEND_CA     : dbg_state_r = 4'd3;
+            State::WAIT_LATENCY: dbg_state_r = 4'd4;
+            State::WRITE_DATA  : dbg_state_r = 4'd5;
+            State::READ_DATA   : dbg_state_r = 4'd6;
+            State::RECOVERY    : dbg_state_r = 4'd7;
+            default            : dbg_state_r = 4'd15;
+        }
+    }
+
+    // 48-bit Command-Address packet (W955D8MBYA Table 2 & Table 5)
+    // Word address = addr[22:1]
+    let word_addr: logic<22> = addr[22:1];
+    let is_reg   : logic     = addr[23];
+    let ca_packet: logic<48> = {
+        if we ? 1'b0 : 1'b1, // CA[47]: 1: Read, 0: Write
+        is_reg, // CA[46]: 0 = Memory Space, 1 = Register Space
+        is_reg, // CA[45]: 0 = Wrapped Burst for Memory, 1 = Register
+        11'b0, // CA[44:34]: Reserved
+        word_addr[20:9], // CA[33:22]: Row Address / Reg Addr
+        word_addr[8:3], // CA[21:16]: Upper Column
+        13'b0, // CA[15:3]: Reserved
+        word_addr[2:0], // CA[2:0]: Lower Column
+    };
+
+    // Fixed latency mode: 12 PSRAM clocks = 24 half-cycles (system cycles)
+    const LATENCY_CYCLES: logic<16> = 16'd24;
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            state      = State::RESET_ASSERT;
+            timer      = 16'd0;
+            ca_shift   = 48'd0;
+            r_we       = 1'b0;
+            r_wdata    = 32'd0;
+            r_wstrb    = 4'd0;
+            r_rdata    = 32'd0;
+            r_ready    = 1'b0;
+            r_cs_n     = 1'b1;
+            r_reset_n  = 1'b0;
+            r_ck       = 1'b0;
+            r_ck_en    = 1'b0;
+            r_dq_oe    = 1'b0;
+            r_dq_out   = 16'd0;
+            r_rwds_oe  = 1'b0;
+            r_rwds_out = 2'b00;
+        } else {
+            r_ready = 1'b0;
+
+            case state {
+                State::RESET_ASSERT: {
+                    r_reset_n = 1'b0;
+                    r_cs_n    = 1'b1;
+                    r_ck_en   = 1'b0;
+                    r_ck      = 1'b0;
+                    r_dq_oe   = 1'b0;
+                    r_rwds_oe = 1'b0;
+                    if (timer as u32) >= psram_pkg::RESET_PULSE_CYCLES {
+                        r_reset_n = 1'b1;
+                        timer     = 16'd0;
+                        state     = State::RESET_WAIT;
+                    } else {
+                        timer += 16'd1;
+                    }
+                }
+
+                State::RESET_WAIT: {
+                    r_reset_n = 1'b1;
+                    if (timer as u32) >= psram_pkg::INIT_WAIT_CYCLES {
+                        timer = 16'd0;
+                        state = State::IDLE;
+                    } else {
+                        timer += 16'd1;
+                    }
+                }
+
+                State::IDLE: {
+                    r_cs_n    = 1'b1;
+                    r_ck_en   = 1'b0;
+                    r_ck      = 1'b0;
+                    r_dq_oe   = 1'b0;
+                    r_rwds_oe = 1'b0;
+                    timer     = 16'd0;
+
+                    if req {
+                        r_we     = we;
+                        r_wdata  = wdata;
+                        r_wstrb  = wstrb;
+                        ca_shift = ca_packet;
+                        r_cs_n   = 1'b0; // Assert CS#
+                        r_ck_en  = 1'b1; // Start clocking
+                        r_ck     = 1'b0;
+                        r_dq_oe  = 1'b1;
+                        // Put first CA byte on DQ
+                        r_dq_out = {ca_packet[47:40], ca_packet[47:40]};
+                        state    = State::SEND_CA;
+                    }
+                }
+
+                State::SEND_CA: {
+                    // Toggle CK on every 27MHz system cycle
+                    r_ck  =  ~r_ck;
+                    timer += 16'd1;
+
+                    // 6 half-cycles of CA:
+                    // Cycle 1: r_ck=1, DQ=Byte 0. Negedge clk: CK rises -> captures Byte 0!
+                    // Cycle 2: r_ck=0, DQ=Byte 1. Negedge clk: CK falls -> captures Byte 1!
+                    // Cycle 3: r_ck=1, DQ=Byte 2. Negedge clk: CK rises -> captures Byte 2!
+                    // Cycle 4: r_ck=0, DQ=Byte 3. Negedge clk: CK falls -> captures Byte 3!
+                    // Cycle 5: r_ck=1, DQ=Byte 4. Negedge clk: CK rises -> captures Byte 4!
+                    // Cycle 6: r_ck=0, DQ=Byte 5. Negedge clk: CK falls -> captures Byte 5!
+                    // Cycle 7: CA complete! Release DQ, enter latency.
+                    case timer {
+                        16'd0: {
+                            // Keep Byte 0 stable for rising edge 1
+                        }
+                        16'd1: {
+                            r_dq_out = {ca_shift[39:32], ca_shift[39:32]};
+                        }
+                        16'd2: {
+                            r_dq_out = {ca_shift[31:24], ca_shift[31:24]};
+                        }
+                        16'd3: {
+                            r_dq_out = {ca_shift[23:16], ca_shift[23:16]};
+                        }
+                        16'd4: {
+                            r_dq_out = {ca_shift[15:8], ca_shift[15:8]};
+                        }
+                        16'd5: {
+                            r_dq_out = {ca_shift[7:0], ca_shift[7:0]};
+                        }
+                        default: {
+                            // CA send complete (6 half-cycles = 3 full PSRAM clock cycles)
+                            r_dq_oe  = 1'b0;
+                            r_dq_out = 16'd0;
+                            timer    = 16'd0;
+                            state    = State::WAIT_LATENCY;
+                        }
+                    }
+                }
+
+                State::WAIT_LATENCY: {
+                    r_ck  =  ~r_ck;
+                    timer += 16'd1;
+
+                    // Drive RWDS low 1 cycle before write data starts as preamble
+                    if r_we && (timer >= (LATENCY_CYCLES - 16'd2)) {
+                        r_rwds_oe  = 1'b1;
+                        r_rwds_out = 2'b00;
+                    }
+
+                    if r_we {
+                        if timer >= (LATENCY_CYCLES - 16'd1) {
+                            timer      = 16'd0;
+                            r_dq_oe    = 1'b1;
+                            r_dq_out   = r_wdata[15:0];
+                            r_rwds_oe  = 1'b1;
+                            r_rwds_out = {~r_wstrb[1], ~r_wstrb[0]};
+                            state      = State::WRITE_DATA;
+                        }
+                    } else {
+                        if timer >= (LATENCY_CYCLES - 16'd2) {
+                            timer   = 16'd0;
+                            r_dq_oe = 1'b0;
+                            state   = State::READ_DATA;
+                        }
+                    }
+                }
+
+                State::WRITE_DATA: {
+                    r_ck  =  ~r_ck;
+                    timer += 16'd1;
+
+                    case timer {
+                        16'd0: {
+                            r_dq_out   = r_wdata[31:16];
+                            r_rwds_out = {~r_wstrb[3], ~r_wstrb[2]};
+                        }
+                        default: {
+                            r_dq_oe   = 1'b0;
+                            r_rwds_oe = 1'b0;
+                            r_cs_n    = 1'b1; // De-assert CS#
+                            r_ck_en   = 1'b0;
+                            r_ck      = 1'b0;
+                            timer     = 16'd0;
+                            state     = State::RECOVERY;
+                        }
+                    }
+                }
+
+                State::READ_DATA: {
+                    r_ck  =  ~r_ck;
+                    timer += 16'd1;
+
+                    // Cycle 1 (timer==1): PSRAM CK rose, samples Word 0
+                    // Cycle 2 (timer==2): PSRAM CK fell, samples Word 1, read transaction finished
+                    if timer == 16'd1 {
+                        r_rdata[15:0] = dq_in;
+                    } else if timer >= 16'd2 {
+                        r_rdata[31:16] = dq_in;
+                        r_cs_n         = 1'b1; // De-assert CS#
+                        r_ck_en        = 1'b0;
+                        r_ck           = 1'b0;
+                        timer          = 16'd0;
+                        state          = State::RECOVERY;
+                    }
+                }
+
+                State::RECOVERY: {
+                    r_cs_n  = 1'b1;
+                    r_ck_en = 1'b0;
+                    r_ck    = 1'b0;
+                    if (timer as u32) >= psram_pkg::CS_RECOVERY_CYCLES {
+                        r_ready = 1'b1; // Pulse ready to host
+                        timer   = 16'd0;
+                        state   = State::IDLE;
+                    } else {
+                        timer += 16'd1;
+                    }
+                }
+
+                default: {
+                    state = State::IDLE;
+                }
+            }
+        }
+    }
+}

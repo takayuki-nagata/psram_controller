@@ -1,0 +1,641 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Tang Nano 9K PSRAM Test Top-Level Module
+// Runs ID0 register read diagnostic with 64-cycle real-time pin trace
+// Followed by read/write verification test on internal Winbond W955D8MBYA PSRAM
+// Outputs results to UART (115200 baud, 8N1) and on-board 6x LEDs
+pub module psram_top #(
+    param DIAG_CYCLES: u32 = 64,
+) (
+    clk  : input clock          , // 27MHz On-Board Oscillator
+    rst_n: input reset_async_low, // S1 Button (Hardware Reset, active-low)
+    btn  : input logic          , // S2 Button (Trigger re-test, active-low)
+
+    // USB-UART
+    uart_tx: output logic,
+    uart_rx: input  logic,
+
+    // On-board 6x LEDs (Active-Low)
+    led: output logic<6>,
+
+    // Internal PSRAM Physical Pins
+    O_psram_ck     : output logic    <2> ,
+    O_psram_ck_n   : output logic    <2> ,
+    O_psram_cs_n   : output logic    <2> ,
+    O_psram_reset_n: output logic    <2> ,
+    IO_psram_dq    : inout  tri logic<16>,
+    IO_psram_rwds  : inout  tri logic<2> ,
+) {
+    // PSRAM Controller Host Interface signals
+    var psram_req       : logic    ;
+    var psram_we        : logic    ;
+    var psram_addr      : logic<24>;
+    var psram_wdata     : logic<32>;
+    var psram_wstrb     : logic<4> ;
+    var psram_rdata     : logic<32>;
+    var psram_ready     : logic    ;
+    var psram_busy      : logic    ;
+    var psram_dbg_sample: logic<32>;
+
+    inst u_psram_ctrl: psram_controller (
+        clk            : clk             ,
+        rst_n          : rst_n           ,
+        req            : psram_req       ,
+        we             : psram_we        ,
+        addr           : psram_addr      ,
+        wdata          : psram_wdata     ,
+        wstrb          : psram_wstrb     ,
+        rdata          : psram_rdata     ,
+        ready          : psram_ready     ,
+        busy           : psram_busy      ,
+        O_psram_ck     : O_psram_ck      ,
+        O_psram_ck_n   : O_psram_ck_n    ,
+        O_psram_cs_n   : O_psram_cs_n    ,
+        O_psram_reset_n: O_psram_reset_n ,
+        IO_psram_dq    : IO_psram_dq     ,
+        IO_psram_rwds  : IO_psram_rwds   ,
+        dbg_sample     : psram_dbg_sample,
+    );
+
+    // Diagnostic Signal Tracer
+    var tracer_trigger: logic    ;
+    var tracer_raddr  : logic<6> ;
+    var tracer_rdata  : logic<32>;
+    var tracer_done   : logic    ;
+    var tracer_active : logic    ;
+
+    inst u_tracer: psram_tracer (
+        clk    : clk             ,
+        rst_n  : rst_n           ,
+        trigger: tracer_trigger  ,
+        sample : psram_dbg_sample,
+        raddr  : tracer_raddr    ,
+        rdata  : tracer_rdata    ,
+        done   : tracer_done     ,
+        active : tracer_active   ,
+    );
+
+    // UART Controller (27MHz / 115200 = 234)
+    var uart_wdata: logic<8>;
+    var uart_we   : logic   ;
+    var uart_full : logic   ;
+
+    inst u_uart: uart_controller #(
+        CNT  : 234,
+        CSIZE: 10 ,
+    ) (
+        clk      : clk       ,
+        rst      : rst_n     ,
+        wdata    : uart_wdata,
+        rdata    : _         ,
+        re       : 1'b0      ,
+        we       : uart_we   ,
+        empty    : _         ,
+        full     : uart_full ,
+        overrun  : _         ,
+        frame_err: _         ,
+        clr_err  : 1'b0      ,
+        txd      : uart_tx   ,
+        rxd      : uart_rx   ,
+    );
+
+    // Test Sequence FSM
+    enum TestState {
+        WAIT_INIT,
+        DIAG_REQ,
+        DIAG_WAIT,
+        DIAG_HDR_START,
+        DIAG_HDR_CHAR,
+        DIAG_ROW_START,
+        DIAG_ROW_CHAR,
+        DIAG_FTR_START,
+        DIAG_FTR_CHAR,
+        WRITE_REQ,
+        WRITE_WAIT,
+        READ_REQ,
+        READ_WAIT,
+        VERIFY,
+        PRINT_START,
+        PRINT_CHAR,
+        DONE_LOOP,
+    }
+
+    var test_state      : TestState    ;
+    var test_idx        : logic    <3> ;
+    var test_pass       : logic        ;
+    var test_fail       : logic        ;
+    var print_idx       : logic    <6> ;
+    var msg_len         : logic    <6> ;
+    var cur_test_pattern: logic    <32>;
+    var cur_test_addr   : logic    <24>;
+    var cur_msg_char    : logic    <8> ;
+    var err_expected    : logic    <32>;
+    var err_got         : logic    <32>;
+    var cur_nibble      : logic    <4> ;
+    var hex_char        : logic    <8> ;
+
+    // Diagnostic Print Indexing
+    var diag_cyc_idx   : logic<6>; // 0 to 63
+    var diag_char_idx  : logic<5>; // 0 to 25
+    var cur_diag_char  : logic<8>;
+    var diag_nibble    : logic<4>;
+    var diag_hex_char  : logic<8>;
+    var diag_psram_done: logic   ;
+
+    always_comb {
+        case test_idx {
+            3'd0   : cur_test_pattern = 32'hA5A5_5A5A;
+            3'd1   : cur_test_pattern = 32'h1234_5678;
+            3'd2   : cur_test_pattern = 32'hDEAD_BEEF;
+            3'd3   : cur_test_pattern = 32'hCAFE_BABE;
+            default: cur_test_pattern = 32'h0000_0000;
+        }
+
+        case test_idx {
+            3'd0   : cur_test_addr = 24'h000000;
+            3'd1   : cur_test_addr = 24'h000004;
+            3'd2   : cur_test_addr = 24'h000008;
+            3'd3   : cur_test_addr = 24'h00000C;
+            default: cur_test_addr = 24'h000000;
+        }
+
+        // Multiplex nibble for test fail hex formatting
+        case print_idx {
+            6'd18  : cur_nibble = err_expected[31:28];
+            6'd19  : cur_nibble = err_expected[27:24];
+            6'd20  : cur_nibble = err_expected[23:20];
+            6'd21  : cur_nibble = err_expected[19:16];
+            6'd22  : cur_nibble = err_expected[15:12];
+            6'd23  : cur_nibble = err_expected[11:8];
+            6'd24  : cur_nibble = err_expected[7:4];
+            6'd25  : cur_nibble = err_expected[3:0];
+            6'd29  : cur_nibble = err_got[31:28];
+            6'd30  : cur_nibble = err_got[27:24];
+            6'd31  : cur_nibble = err_got[23:20];
+            6'd32  : cur_nibble = err_got[19:16];
+            6'd33  : cur_nibble = err_got[15:12];
+            6'd34  : cur_nibble = err_got[11:8];
+            6'd35  : cur_nibble = err_got[7:4];
+            6'd36  : cur_nibble = err_got[3:0];
+            default: cur_nibble = 4'd0;
+        }
+
+        // Multiplex nibble for diagnostic trace hex formatting
+        case diag_char_idx {
+            5'd2   : diag_nibble = diag_cyc_idx[3:0];
+            5'd5   : diag_nibble = tracer_rdata[31:28];
+            5'd8   : diag_nibble = tracer_rdata[19:16];
+            5'd19  : diag_nibble = tracer_rdata[15:12];
+            5'd20  : diag_nibble = tracer_rdata[11:8];
+            5'd22  : diag_nibble = tracer_rdata[7:4];
+            5'd23  : diag_nibble = tracer_rdata[3:0];
+            default: diag_nibble = 4'd0;
+        }
+
+        // Hex character conversion table
+        case cur_nibble {
+            4'h0   : hex_char = 8'h30; // '0'
+            4'h1   : hex_char = 8'h31; // '1'
+            4'h2   : hex_char = 8'h32; // '2'
+            4'h3   : hex_char = 8'h33; // '3'
+            4'h4   : hex_char = 8'h34; // '4'
+            4'h5   : hex_char = 8'h35; // '5'
+            4'h6   : hex_char = 8'h36; // '6'
+            4'h7   : hex_char = 8'h37; // '7'
+            4'h8   : hex_char = 8'h38; // '8'
+            4'h9   : hex_char = 8'h39; // '9'
+            4'hA   : hex_char = 8'h41; // 'A'
+            4'hB   : hex_char = 8'h42; // 'B'
+            4'hC   : hex_char = 8'h43; // 'C'
+            4'hD   : hex_char = 8'h44; // 'D'
+            4'hE   : hex_char = 8'h45; // 'E'
+            default: hex_char = 8'h46; // 'F'
+        }
+
+        case diag_nibble {
+            4'h0   : diag_hex_char = 8'h30;
+            4'h1   : diag_hex_char = 8'h31;
+            4'h2   : diag_hex_char = 8'h32;
+            4'h3   : diag_hex_char = 8'h33;
+            4'h4   : diag_hex_char = 8'h34;
+            4'h5   : diag_hex_char = 8'h35;
+            4'h6   : diag_hex_char = 8'h36;
+            4'h7   : diag_hex_char = 8'h37;
+            4'h8   : diag_hex_char = 8'h38;
+            4'h9   : diag_hex_char = 8'h39;
+            4'hA   : diag_hex_char = 8'h41;
+            4'hB   : diag_hex_char = 8'h42;
+            4'hC   : diag_hex_char = 8'h43;
+            4'hD   : diag_hex_char = 8'h44;
+            4'hE   : diag_hex_char = 8'h45;
+            default: diag_hex_char = 8'h46;
+        }
+
+        // Trace row string formatter: "C##: S TM C K OE RW D1 D0\r\n" (26 characters)
+        case diag_char_idx {
+            5'd0   : cur_diag_char = 8'h43; // 'C'
+            5'd1   : cur_diag_char = 8'h30 | {6'd0, diag_cyc_idx[5:4]}; // '0'..'3'
+            5'd2   : cur_diag_char = diag_hex_char; // '0'..'F'
+            5'd3   : cur_diag_char = 8'h3A; // ':'
+            5'd4   : cur_diag_char = 8'h20; // ' '
+            5'd5   : cur_diag_char = diag_hex_char; // State (0..7)
+            5'd6   : cur_diag_char = 8'h20; // ' '
+            5'd7   : cur_diag_char = 8'h30 | {6'd0, tracer_rdata[21:20]}; // Timer upper
+            5'd8   : cur_diag_char = diag_hex_char; // Timer lower
+            5'd9   : cur_diag_char = 8'h20; // ' '
+            5'd10  : cur_diag_char = 8'h30 | {7'd0, tracer_rdata[27]}; // CS#
+            5'd11  : cur_diag_char = 8'h20; // ' '
+            5'd12  : cur_diag_char = 8'h30 | {7'd0, tracer_rdata[26]}; // CK
+            5'd13  : cur_diag_char = 8'h20; // ' '
+            5'd14  : cur_diag_char = 8'h30 | {7'd0, tracer_rdata[25]}; // DQ_OE
+            5'd15  : cur_diag_char = 8'h20; // ' '
+            5'd16  : cur_diag_char = 8'h30 | {7'd0, tracer_rdata[23]}; // RWDS[1]
+            5'd17  : cur_diag_char = 8'h30 | {7'd0, tracer_rdata[22]}; // RWDS[0]
+            5'd18  : cur_diag_char = 8'h20; // ' '
+            5'd19  : cur_diag_char = diag_hex_char; // DQ[15:12]
+            5'd20  : cur_diag_char = diag_hex_char; // DQ[11:8]
+            5'd21  : cur_diag_char = 8'h20; // ' '
+            5'd22  : cur_diag_char = diag_hex_char; // DQ[7:4]
+            5'd23  : cur_diag_char = diag_hex_char; // DQ[3:0]
+            5'd24  : cur_diag_char = 8'h0D; // \r
+            default: cur_diag_char = 8'h0A; // \n
+        }
+
+        if test_pass {
+            // Message PASS: "\r\n[PSRAM] TEST PASSED! 64Mb OK\r\n" (32 bytes)
+            case print_idx {
+                6'd0   : cur_msg_char = 8'h0D;
+                6'd1   : cur_msg_char = 8'h0A;
+                6'd2   : cur_msg_char = 8'h5B; // [
+                6'd3   : cur_msg_char = 8'h50; // P
+                6'd4   : cur_msg_char = 8'h53; // S
+                6'd5   : cur_msg_char = 8'h52; // R
+                6'd6   : cur_msg_char = 8'h41; // A
+                6'd7   : cur_msg_char = 8'h4D; // M
+                6'd8   : cur_msg_char = 8'h5D; // ]
+                6'd9   : cur_msg_char = 8'h20; //
+                6'd10  : cur_msg_char = 8'h54; // T
+                6'd11  : cur_msg_char = 8'h45; // E
+                6'd12  : cur_msg_char = 8'h53; // S
+                6'd13  : cur_msg_char = 8'h54; // T
+                6'd14  : cur_msg_char = 8'h20; //
+                6'd15  : cur_msg_char = 8'h50; // P
+                6'd16  : cur_msg_char = 8'h41; // A
+                6'd17  : cur_msg_char = 8'h53; // S
+                6'd18  : cur_msg_char = 8'h53; // S
+                6'd19  : cur_msg_char = 8'h45; // E
+                6'd20  : cur_msg_char = 8'h44; // D
+                6'd21  : cur_msg_char = 8'h21; // !
+                6'd22  : cur_msg_char = 8'h20; //
+                6'd23  : cur_msg_char = 8'h36; // 6
+                6'd24  : cur_msg_char = 8'h34; // 4
+                6'd25  : cur_msg_char = 8'h4D; // M
+                6'd26  : cur_msg_char = 8'h62; // b
+                6'd27  : cur_msg_char = 8'h20; //
+                6'd28  : cur_msg_char = 8'h4F; // O
+                6'd29  : cur_msg_char = 8'h4B; // K
+                6'd30  : cur_msg_char = 8'h0D;
+                6'd31  : cur_msg_char = 8'h0A;
+                default: cur_msg_char = 8'h00;
+            }
+        } else {
+            // Message FAIL: "\r\n[PSRAM] FAIL! E=XXXXXXXX G=YYYYYYYY\r\n" (39 bytes)
+            case print_idx {
+                6'd0   : cur_msg_char = 8'h0D;
+                6'd1   : cur_msg_char = 8'h0A;
+                6'd2   : cur_msg_char = 8'h5B;
+                6'd3   : cur_msg_char = 8'h50;
+                6'd4   : cur_msg_char = 8'h53;
+                6'd5   : cur_msg_char = 8'h52;
+                6'd6   : cur_msg_char = 8'h41;
+                6'd7   : cur_msg_char = 8'h4D;
+                6'd8   : cur_msg_char = 8'h5D;
+                6'd9   : cur_msg_char = 8'h20;
+                6'd10  : cur_msg_char = 8'h46; // F
+                6'd11  : cur_msg_char = 8'h41; // A
+                6'd12  : cur_msg_char = 8'h49; // I
+                6'd13  : cur_msg_char = 8'h4C; // L
+                6'd14  : cur_msg_char = 8'h21; // !
+                6'd15  : cur_msg_char = 8'h20;
+                6'd16  : cur_msg_char = 8'h45; // E
+                6'd17  : cur_msg_char = 8'h3D; // =
+                6'd18  : cur_msg_char = hex_char;
+                6'd19  : cur_msg_char = hex_char;
+                6'd20  : cur_msg_char = hex_char;
+                6'd21  : cur_msg_char = hex_char;
+                6'd22  : cur_msg_char = hex_char;
+                6'd23  : cur_msg_char = hex_char;
+                6'd24  : cur_msg_char = hex_char;
+                6'd25  : cur_msg_char = hex_char;
+                6'd26  : cur_msg_char = 8'h20;
+                6'd27  : cur_msg_char = 8'h47; // G
+                6'd28  : cur_msg_char = 8'h3D; // =
+                6'd29  : cur_msg_char = hex_char;
+                6'd30  : cur_msg_char = hex_char;
+                6'd31  : cur_msg_char = hex_char;
+                6'd32  : cur_msg_char = hex_char;
+                6'd33  : cur_msg_char = hex_char;
+                6'd34  : cur_msg_char = hex_char;
+                6'd35  : cur_msg_char = hex_char;
+                6'd36  : cur_msg_char = hex_char;
+                6'd37  : cur_msg_char = 8'h0D;
+                6'd38  : cur_msg_char = 8'h0A;
+                default: cur_msg_char = 8'h00;
+            }
+        }
+    }
+
+    // Header message: "\r\n=== PSRAM TRACE (ID0) ===\r\nCYC: S TM C K OE RW D1 D0\r\n" (54 bytes)
+    var cur_hdr_char: logic<8>;
+    always_comb {
+        case print_idx {
+            6'd0   : cur_hdr_char = 8'h0D;
+            6'd1   : cur_hdr_char = 8'h0A;
+            6'd2   : cur_hdr_char = 8'h3D; // =
+            6'd3   : cur_hdr_char = 8'h3D;
+            6'd4   : cur_hdr_char = 8'h3D;
+            6'd5   : cur_hdr_char = 8'h20;
+            6'd6   : cur_hdr_char = 8'h50; // P
+            6'd7   : cur_hdr_char = 8'h53; // S
+            6'd8   : cur_hdr_char = 8'h52; // R
+            6'd9   : cur_hdr_char = 8'h41; // A
+            6'd10  : cur_hdr_char = 8'h4D; // M
+            6'd11  : cur_hdr_char = 8'h20;
+            6'd12  : cur_hdr_char = 8'h54; // T
+            6'd13  : cur_hdr_char = 8'h52; // R
+            6'd14  : cur_hdr_char = 8'h41; // A
+            6'd15  : cur_hdr_char = 8'h43; // C
+            6'd16  : cur_hdr_char = 8'h45; // E
+            6'd17  : cur_hdr_char = 8'h20;
+            6'd18  : cur_hdr_char = 8'h28; // (
+            6'd19  : cur_hdr_char = 8'h49; // I
+            6'd20  : cur_hdr_char = 8'h44; // D
+            6'd21  : cur_hdr_char = 8'h30; // 0
+            6'd22  : cur_hdr_char = 8'h29; // )
+            6'd23  : cur_hdr_char = 8'h20;
+            6'd24  : cur_hdr_char = 8'h3D;
+            6'd25  : cur_hdr_char = 8'h3D;
+            6'd26  : cur_hdr_char = 8'h3D;
+            6'd27  : cur_hdr_char = 8'h0D;
+            6'd28  : cur_hdr_char = 8'h0A;
+            6'd29  : cur_hdr_char = 8'h43; // C
+            6'd30  : cur_hdr_char = 8'h59; // Y
+            6'd31  : cur_hdr_char = 8'h43; // C
+            6'd32  : cur_hdr_char = 8'h3A; // :
+            6'd33  : cur_hdr_char = 8'h20;
+            6'd34  : cur_hdr_char = 8'h53; // S
+            6'd35  : cur_hdr_char = 8'h20;
+            6'd36  : cur_hdr_char = 8'h54; // T
+            6'd37  : cur_hdr_char = 8'h4D; // M
+            6'd38  : cur_hdr_char = 8'h20;
+            6'd39  : cur_hdr_char = 8'h43; // C
+            6'd40  : cur_hdr_char = 8'h20;
+            6'd41  : cur_hdr_char = 8'h4B; // K
+            6'd42  : cur_hdr_char = 8'h20;
+            6'd43  : cur_hdr_char = 8'h4F; // O
+            6'd44  : cur_hdr_char = 8'h45; // E
+            6'd45  : cur_hdr_char = 8'h20;
+            6'd46  : cur_hdr_char = 8'h52; // R
+            6'd47  : cur_hdr_char = 8'h57; // W
+            6'd48  : cur_hdr_char = 8'h20;
+            6'd49  : cur_hdr_char = 8'h44; // D
+            6'd50  : cur_hdr_char = 8'h31; // 1
+            6'd51  : cur_hdr_char = 8'h20;
+            6'd52  : cur_hdr_char = 8'h44; // D
+            6'd53  : cur_hdr_char = 8'h30; // 0
+            6'd54  : cur_hdr_char = 8'h0D; // \r
+            6'd55  : cur_hdr_char = 8'h0A; // \n
+            default: cur_hdr_char = 8'h00;
+        }
+    }
+
+    // Footer message: "\r\n=== END TRACE ===\r\n" (21 bytes)
+    var cur_ftr_char: logic<8>;
+    always_comb {
+        case print_idx {
+            6'd0   : cur_ftr_char = 8'h0D;
+            6'd1   : cur_ftr_char = 8'h0A;
+            6'd2   : cur_ftr_char = 8'h3D;
+            6'd3   : cur_ftr_char = 8'h3D;
+            6'd4   : cur_ftr_char = 8'h3D;
+            6'd5   : cur_ftr_char = 8'h20;
+            6'd6   : cur_ftr_char = 8'h45; // E
+            6'd7   : cur_ftr_char = 8'h4E; // N
+            6'd8   : cur_ftr_char = 8'h44; // D
+            6'd9   : cur_ftr_char = 8'h20;
+            6'd10  : cur_ftr_char = 8'h54; // T
+            6'd11  : cur_ftr_char = 8'h52; // R
+            6'd12  : cur_ftr_char = 8'h41; // A
+            6'd13  : cur_ftr_char = 8'h43; // C
+            6'd14  : cur_ftr_char = 8'h45; // E
+            6'd15  : cur_ftr_char = 8'h20;
+            6'd16  : cur_ftr_char = 8'h3D;
+            6'd17  : cur_ftr_char = 8'h3D;
+            6'd18  : cur_ftr_char = 8'h3D;
+            6'd19  : cur_ftr_char = 8'h0D;
+            6'd20  : cur_ftr_char = 8'h0A;
+            default: cur_ftr_char = 8'h00;
+        }
+    }
+
+    // LED drive
+    assign led = if test_pass ? 6'b000000 : (if test_fail ? 6'b111110 : ~{3'b000, test_idx});
+
+    assign tracer_raddr = diag_cyc_idx;
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            test_state      = TestState::WAIT_INIT;
+            test_idx        = 3'd0;
+            test_pass       = 1'b0;
+            test_fail       = 1'b0;
+            print_idx       = 6'd0;
+            msg_len         = 6'd0;
+            err_expected    = 32'd0;
+            err_got         = 32'd0;
+            psram_req       = 1'b0;
+            psram_we        = 1'b0;
+            psram_addr      = 24'd0;
+            psram_wdata     = 32'd0;
+            psram_wstrb     = 4'b1111;
+            uart_wdata      = 8'd0;
+            uart_we         = 1'b0;
+            tracer_trigger  = 1'b0;
+            diag_cyc_idx    = 6'd0;
+            diag_char_idx   = 5'd0;
+            diag_psram_done = 1'b0;
+        } else {
+            psram_req      = 1'b0;
+            uart_we        = 1'b0;
+            tracer_trigger = 1'b0;
+
+            if psram_ready {
+                diag_psram_done = 1'b1;
+            }
+
+            case test_state {
+                TestState::WAIT_INIT: {
+                    if !psram_busy {
+                        diag_psram_done = 1'b0;
+                        test_state      = TestState::DIAG_REQ;
+                    }
+                }
+
+                TestState::DIAG_REQ: {
+                    // ID0 Register Read: addr[23]=1 (Register Space), addr[22:0]=0
+                    psram_req       = 1'b1;
+                    psram_we        = 1'b0;
+                    psram_addr      = 24'h800000;
+                    tracer_trigger  = 1'b1;
+                    diag_psram_done = 1'b0;
+                    test_state      = TestState::DIAG_WAIT;
+                }
+
+                TestState::DIAG_WAIT: {
+                    if diag_psram_done && tracer_done {
+                        test_state = TestState::DIAG_HDR_START;
+                    }
+                }
+
+                TestState::DIAG_HDR_START: {
+                    print_idx  = 6'd0;
+                    test_state = TestState::DIAG_HDR_CHAR;
+                }
+
+                TestState::DIAG_HDR_CHAR: {
+                    if !uart_full && !uart_we {
+                        uart_wdata = cur_hdr_char;
+                        uart_we    = 1'b1;
+                        if print_idx == 6'd55 {
+                            test_state = TestState::DIAG_ROW_START;
+                        } else {
+                            print_idx += 6'd1;
+                        }
+                    }
+                }
+
+                TestState::DIAG_ROW_START: {
+                    diag_cyc_idx  = 6'd0;
+                    diag_char_idx = 5'd0;
+                    test_state    = TestState::DIAG_ROW_CHAR;
+                }
+
+                TestState::DIAG_ROW_CHAR: {
+                    if !uart_full && !uart_we {
+                        uart_wdata = cur_diag_char;
+                        uart_we    = 1'b1;
+                        if diag_char_idx == 5'd25 {
+                            diag_char_idx = 5'd0;
+                            if (diag_cyc_idx as u32) >= (DIAG_CYCLES - 1) {
+                                test_state = TestState::DIAG_FTR_START;
+                            } else {
+                                diag_cyc_idx += 6'd1;
+                            }
+                        } else {
+                            diag_char_idx += 5'd1;
+                        }
+                    }
+                }
+
+                TestState::DIAG_FTR_START: {
+                    print_idx  = 6'd0;
+                    test_state = TestState::DIAG_FTR_CHAR;
+                }
+
+                TestState::DIAG_FTR_CHAR: {
+                    if !uart_full && !uart_we {
+                        uart_wdata = cur_ftr_char;
+                        uart_we    = 1'b1;
+                        if print_idx == 6'd20 {
+                            test_idx   = 3'd0;
+                            test_state = TestState::WRITE_REQ;
+                        } else {
+                            print_idx += 6'd1;
+                        }
+                    }
+                }
+
+                TestState::WRITE_REQ: {
+                    psram_req   = 1'b1;
+                    psram_we    = 1'b1;
+                    psram_addr  = cur_test_addr;
+                    psram_wdata = cur_test_pattern;
+                    psram_wstrb = 4'b1111;
+                    test_state  = TestState::WRITE_WAIT;
+                }
+
+                TestState::WRITE_WAIT: {
+                    if psram_ready {
+                        if test_idx == 3'd3 {
+                            test_idx   = 3'd0;
+                            test_state = TestState::READ_REQ;
+                        } else {
+                            test_idx   += 3'd1;
+                            test_state =  TestState::WRITE_REQ;
+                        }
+                    }
+                }
+
+                TestState::READ_REQ: {
+                    psram_req  = 1'b1;
+                    psram_we   = 1'b0;
+                    psram_addr = cur_test_addr;
+                    test_state = TestState::READ_WAIT;
+                }
+
+                TestState::READ_WAIT: {
+                    if psram_ready {
+                        test_state = TestState::VERIFY;
+                    }
+                }
+
+                TestState::VERIFY: {
+                    if psram_rdata != cur_test_pattern {
+                        err_expected = cur_test_pattern;
+                        err_got      = psram_rdata;
+                        test_fail    = 1'b1;
+                        test_state   = TestState::PRINT_START;
+                    } else if test_idx == 3'd3 {
+                        test_pass  = 1'b1;
+                        test_state = TestState::PRINT_START;
+                    } else {
+                        test_idx   += 3'd1;
+                        test_state =  TestState::READ_REQ;
+                    }
+                }
+
+                TestState::PRINT_START: {
+                    print_idx  = 6'd0;
+                    msg_len    = if test_pass ? 6'd32 : 6'd39;
+                    test_state = TestState::PRINT_CHAR;
+                }
+
+                TestState::PRINT_CHAR: {
+                    if !uart_full && !uart_we {
+                        uart_wdata = cur_msg_char;
+                        uart_we    = 1'b1;
+                        if print_idx == (msg_len - 6'd1) {
+                            test_state = TestState::DONE_LOOP;
+                        } else {
+                            print_idx += 6'd1;
+                        }
+                    }
+                }
+
+                TestState::DONE_LOOP: {
+                    if btn == 1'b0 {
+                        test_pass  = 1'b0;
+                        test_fail  = 1'b0;
+                        test_idx   = 3'd0;
+                        test_state = TestState::DIAG_REQ;
+                    }
+                }
+
+                default: {
+                    test_state = TestState::WAIT_INIT;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,122 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// UART Receiver Module
+pub module uart_rx #(
+    param DSIZE      : u32 = 8  ,
+    param BITCNT_SIZE: u32 = 4  ,
+    param CNT        : u32 = 434,
+    param CSIZE      : u32 = 10 ,
+) (
+    clk      : input  clock       ,
+    rst      : input  reset       ,
+    data     : output logic<DSIZE>,
+    rdy      : output logic       ,
+    frame_err: output logic       , // with rdy: the stop bit was sampled low
+    rxd      : input  logic       ,
+) {
+    enum State {
+        IDLE,
+        WAITFORMIDBIT,
+        RECEIVING,
+    }
+
+    var rxd_sync   : logic<2>          ;
+    var state      : State             ;
+    var next_state : State             ;
+    var reg_clkcnt : logic<CSIZE>      ;
+    var next_clkcnt: logic<CSIZE>      ;
+    var reg_bitcnt : logic<BITCNT_SIZE>;
+    var next_bitcnt: logic<BITCNT_SIZE>;
+    var timer_clr  : logic             ; // restart the bit timer at mid start bit
+    var sreg_ce    : logic             ;
+    var sreg_pout  : logic<DSIZE>      ;
+
+    inst timer_inst: clk_timer #(
+        CNT  : CNT  ,
+        CSIZE: CSIZE,
+    ) (
+        clk: clk      ,
+        rst: rst      ,
+        clr: timer_clr,
+        alm: sreg_ce  ,
+    );
+
+    inst sreg_inst: shift_registers #(
+        SIZE: DSIZE,
+    ) (
+        clk : clk        ,
+        rst : rst        ,
+        ce  : sreg_ce    ,
+        set : '0         ,
+        sin : rxd_sync[1],
+        pin : '0         ,
+        sout: _          ,
+        pout: sreg_pout  ,
+    );
+
+    always_ff (clk, rst) {
+        if_reset {
+            rxd_sync   = 2'b11;
+            reg_clkcnt = '0;
+            reg_bitcnt = '0;
+            state      = State::IDLE;
+        } else {
+            rxd_sync   = {rxd_sync[0], rxd};
+            reg_clkcnt = next_clkcnt;
+            reg_bitcnt = next_bitcnt;
+            state      = next_state;
+        }
+    }
+
+    always_comb {
+        data        = sreg_pout;
+        timer_clr   = 1'b0;
+        next_clkcnt = reg_clkcnt;
+        next_bitcnt = reg_bitcnt;
+        rdy         = '0;
+        frame_err   = '0;
+        next_state  = state;
+
+        case state {
+            State::IDLE: {
+                if !rxd_sync[1] { // Start bit detected
+                    next_clkcnt = CNT / 2;
+                    next_state  = State::WAITFORMIDBIT;
+                } else {
+                    next_state = State::IDLE;
+                }
+            }
+            State::WAITFORMIDBIT: {
+                if reg_clkcnt == '0 {
+                    if rxd_sync[1] {
+                        // Line high again at mid start bit: a glitch, not a start bit
+                        next_state = State::IDLE;
+                    } else {
+                        timer_clr   = 1'b1; // next bit-timer alarm lands mid data bit 0
+                        next_bitcnt = '0;
+                        next_state  = State::RECEIVING;
+                    }
+                } else {
+                    next_clkcnt = reg_clkcnt - 1;
+                    next_state  = State::WAITFORMIDBIT;
+                }
+            }
+            State::RECEIVING: {
+                next_state = State::RECEIVING;
+                if sreg_ce {
+                    if reg_bitcnt == DSIZE {
+                        rdy        = '1;
+                        frame_err  = !rxd_sync[1]; // mid stop bit
+                        next_state = State::IDLE;
+                    } else {
+                        next_bitcnt = reg_bitcnt + 1;
+                    }
+                }
+            }
+            default: {
+                next_state = State::IDLE;
+            }
+        }
+    }
+}

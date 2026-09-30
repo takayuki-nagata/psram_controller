@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+.build/
+psram_controller.f
+
+# Simulation & synthesis output
+*.vcd
+*.fs
+*.json
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS & Editor files
+.DS_Store
+*.swp
+*~
+
+# Veryl generated outputs
+/dependencies/
+*.sv.map
+/src/**/*.sv
+!/src/psram_phy_io.sv

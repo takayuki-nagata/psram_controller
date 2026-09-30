@@ -1,0 +1,94 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Top-level PSRAM controller module for Tang Nano 9K
+// Integrates HyperBus core FSM and physical IO buffers
+pub module psram_controller (
+    clk  : input clock          ,
+    rst_n: input reset_async_low,
+
+    // Host / User Interface (compatible with RISC-V SoC memory bus)
+    req  : input  logic    ,
+    we   : input  logic    ,
+    addr : input  logic<24>,
+    wdata: input  logic<32>,
+    wstrb: input  logic<4> ,
+    rdata: output logic<32>,
+    ready: output logic    ,
+    busy : output logic    ,
+
+    // Internal PSRAM Physical Pins (connected via tangnano9k.cst)
+    O_psram_ck     : output logic    <2> ,
+    O_psram_ck_n   : output logic    <2> ,
+    O_psram_cs_n   : output logic    <2> ,
+    O_psram_reset_n: output logic    <2> ,
+    IO_psram_dq    : inout  tri logic<16>,
+    IO_psram_rwds  : inout  tri logic<2> ,
+    dbg_sample     : output logic    <32>,
+) {
+    // Interconnect between psram_core and psram_phy_io
+    var psram_ck_reg: logic    ;
+    var ck_en       : logic    ;
+    var cs_n_sig    : logic<2> ;
+    var reset_n_sig : logic<2> ;
+    var dq_oe_sig   : logic    ;
+    var dq_out_sig  : logic<16>;
+    var dq_in_sig   : logic<16>;
+    var rwds_oe_sig : logic    ;
+    var rwds_out_sig: logic<2> ;
+    var rwds_in_sig : logic<2> ;
+    var dbg_state   : logic<4> ;
+    var dbg_timer   : logic<6> ;
+
+    assign dbg_sample = {
+        dbg_state, cs_n_sig[0], psram_ck_reg, dq_oe_sig, rwds_oe_sig, rwds_in_sig, dbg_timer[5:0], dq_in_sig
+    };
+
+    inst u_core: psram_core (
+        clk                       ,
+        rst_n                     ,
+        req                       ,
+        we                        ,
+        addr                      ,
+        wdata                     ,
+        wstrb                     ,
+        rdata                     ,
+        ready                     ,
+        busy                      ,
+        psram_ck_reg              ,
+        ck_en                     ,
+        cs_n_out    : cs_n_sig    ,
+        reset_n_out : reset_n_sig ,
+        dq_oe       : dq_oe_sig   ,
+        dq_out      : dq_out_sig  ,
+        dq_in       : dq_in_sig   ,
+        rwds_oe     : rwds_oe_sig ,
+        rwds_out    : rwds_out_sig,
+        rwds_in     : rwds_in_sig ,
+        dbg_state                 ,
+        dbg_timer                 ,
+    );
+
+    unsafe (cdc) {
+        inst u_phy: $sv::psram_phy_io (
+            clk                          ,
+            rst_n                        ,
+            psram_ck_reg                 ,
+            ck_en                        ,
+            cs_n_in        : cs_n_sig    ,
+            reset_n_in     : reset_n_sig ,
+            dq_oe          : dq_oe_sig   ,
+            dq_out         : dq_out_sig  ,
+            dq_in          : dq_in_sig   ,
+            rwds_oe        : rwds_oe_sig ,
+            rwds_out       : rwds_out_sig,
+            rwds_in        : rwds_in_sig ,
+            O_psram_ck                   ,
+            O_psram_ck_n                 ,
+            O_psram_cs_n                 ,
+            O_psram_reset_n              ,
+            IO_psram_dq                  ,
+            IO_psram_rwds                ,
+        );
+    }
+}
