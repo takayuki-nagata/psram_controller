@@ -7,7 +7,7 @@ demo in `demo/tangnano9k/` is a separate Veryl project and is not pulled in.
 ## 1. Add the submodule and the Veryl dependency
 
 ```sh
-git submodule add <url of this repository> vendor/psram_controller
+git submodule add https://github.com/takayuki-nagata/psram_controller.git vendor/psram_controller
 git -C vendor/psram_controller checkout <tag>   # pin a tagged, hardware-verified release
 ```
 
@@ -65,7 +65,8 @@ constraints of [`demo/tangnano9k/tangnano9k.cst`](../demo/tangnano9k/tangnano9k.
 - **Response**: exactly one per request, `rsp_valid` High for one cycle; `rsp_rdata`
   is valid in that cycle for reads. `req_ready` is High again in the same cycle, so the
   next request can be accepted back-to-back.
-- **Latency**: a 32-bit access takes about 38 cycles from acceptance to response.
+- **Latency**: a request accepted in cycle 0 gets `rsp_valid` in cycle 35 (read), 34 (memory
+  write) or 12 (register write); checked by `test_latency`.
 - **Addresses**: byte address, 4-byte aligned (`req_addr[1:0]` ignored).
   `req_addr[23] = 0`: 8 MB of memory; `= 1`: register space, see `psram_pkg::REG_ADDR_*`
   (ID0 `0x800000`, ID1 `0x800004`, CR0 `0x800020`, CR1 `0x800024`).

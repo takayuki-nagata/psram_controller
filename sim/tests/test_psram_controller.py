@@ -252,3 +252,29 @@ async def test_handshake(dut):
 
 # Documentation of the die mapping used by the backdoor (kept executable)
 assert die_words(0x44332211) == (0x1133, 0x2244)
+
+
+async def _latency(env: PsramEnv, we: bool, addr: int, wdata: int = 0x01020304) -> int:
+    """N such that a request accepted in cycle 0 (req_valid && req_ready) gets rsp_valid
+    in cycle N."""
+    await env.request(we, addr, wdata)
+    cycles = 1  # request() returns in cycle 1 (after the falling edge that follows acceptance)
+    while env.dut.rsp_valid.value == 0:
+        await FallingEdge(env.dut.clk)
+        cycles += 1
+    return cycles
+
+
+@cocotb.test()
+async def test_latency(dut):
+    """Access latency, documented in README/docs for integrators (same at 18 and 27 MHz)."""
+    env = PsramEnv(dut)
+    await env.start()
+    measured = {
+        "memory write": await _latency(env, True, 0x6000),
+        "memory read": await _latency(env, False, 0x6000),
+        "register write": await _latency(env, True, REG_CR0, reg_write_data(CR0_DEFAULT)),
+    }
+    dut._log.info(f"latency (cycles): {measured}")
+    assert measured == {"memory write": 34, "memory read": 35, "register write": 12}, measured
+    await env.finish()

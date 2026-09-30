@@ -125,8 +125,8 @@ response (`rsp_valid`, `rsp_rdata`) and `init_done`. `CLK_HZ` sets the system cl
 the reset pulse, power-up wait and CS# recovery are derived from the datasheet values in ns.
 
 ### 4.2 Finite State Machine (FSM)
-1. `RESET_ASSERT`: Holds `O_psram_reset_n` Low for `tRP` (>= 200 ns).
-2. `RESET_WAIT`: Drives `O_psram_reset_n` High and waits `tVCS` (150 us).
+1. `RESET_ASSERT`: Holds `O_psram_reset_n` Low for 400 ns (`tRP` >= 200 ns).
+2. `RESET_WAIT`: Drives `O_psram_reset_n` High and waits 200 us (`tVCS` >= 150 us); then `init_done`.
 3. `IDLE`: `req_ready = 1`; accepts a request.
 4. `SEND_CA`: Drives `CS# = 0` and transmits the 48-bit CA packet over 6 system cycles.
 5. `WAIT_LATENCY`: Waits for the fixed latency (skipped for register writes).
@@ -137,6 +137,8 @@ the reset pulse, power-up wait and CS# recovery are derived from the datasheet v
 ---
 
 ## 5. RISC-V SoC Integration Guide
+
+See [integration.md](integration.md) for the submodule / Veryl dependency setup and the full interface contract.
 
 1. Map PSRAM to an address window (8 MB of memory space, plus the register space if needed).
 2. Present CPU loads/stores as requests (`req_valid` held until `req_ready`).

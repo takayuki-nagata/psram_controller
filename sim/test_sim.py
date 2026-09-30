@@ -29,6 +29,7 @@ TESTS = [
     "test_back_to_back",
     "test_reset_during_access",
     "test_handshake",
+    "test_latency",
 ]
 
 

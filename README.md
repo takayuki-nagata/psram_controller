@@ -4,23 +4,27 @@
 [![Hardware: Tang Nano 9K](https://img.shields.io/badge/Hardware-Tang%20Nano%209K-orange.svg)](https://wiki.sipeed.com/hardware/en/tang/Tang-Nano-9K/Nano-9K.html)
 [![Language: Veryl](https://img.shields.io/badge/Language-Veryl%20HDL-green.svg)](https://veryl-lang.org/)
 [![Toolchain: Open--Source](https://img.shields.io/badge/Toolchain-Yosys%20%7C%20nextpnr%20%7C%20Apycula-purple.svg)](https://github.com/YosysHQ/oss-cad-suite-build)
-[![Simulation: PASS](https://img.shields.io/badge/Simulation-100%25%20PASS-brightgreen.svg)](#1-run-the-tests)
-[![Silicon: Verified](https://img.shields.io/badge/Silicon-100%25%20Verified-brightgreen.svg)](#3-run-the-hardware-test)
+[![CI](https://github.com/takayuki-nagata/psram_controller/actions/workflows/ci.yml/badge.svg)](https://github.com/takayuki-nagata/psram_controller/actions/workflows/ci.yml)
+[![Hardware: verified at 18/27 MHz](https://img.shields.io/badge/Hardware-verified%20at%2018%2F27%20MHz-brightgreen.svg)](#3-run-the-hardware-test)
 
 A clean-room, robust **HyperBus PSRAM Controller** designed for the **Winbond W955D8MBYA** 64Mbit (8MB) PSRAM embedded inside the Gowin GW1NR-9C FPGA on the **Tang Nano 9K** development board.
 
-Written in modern **Veryl HDL**, synthesized with **Yosys**, placed and routed with **nextpnr-himbaechel**, and fully verified both in RTL simulation (**Icarus Verilog**) and on real silicon.
+Written in **Veryl HDL**, synthesized with **Yosys**, placed and routed with **nextpnr-himbaechel**, and verified with
+cocotb tests against a datasheet-based PSRAM model, formal proofs (SymbiYosys) and a full-memory test on the board.
+It is meant to be used by other projects (e.g. [VUX9K](https://github.com/takayuki-nagata/VUX9K)) as a git submodule
+and Veryl dependency; see [docs/integration.md](docs/integration.md).
 
 ---
 
 ## Key Highlights
 
-- **16-bit DDR Data Bus**: Operates the two internal 32Mb x8 dies in lockstep for 16-bit wide DDR data transfers (one CK edge per system clock cycle; `CLK_HZ` parameter, tested at 18 and 27 MHz).
+- **16-bit DDR Data Bus**: Operates the two internal 32Mb x8 dies in lockstep for 16-bit wide DDR data transfers; one 32-bit word per access (one CK edge per system clock cycle; `CLK_HZ` parameter, tested at 18 and 27 MHz).
+- **valid/ready Host Interface**: One request in flight, exactly one response per request, back-to-back capable; 35 cycles per read, 34 per write.
 - **Center-Aligned Clocking**: PSRAM CK is registered on `negedge clk`, so that every CK edge is half a system clock after the data changes, giving generous setup and hold margins without complex PLLs or DLLs.
 - **Fixed Latency Mode**: Operates at 2x Fixed Latency (12 PSRAM clock cycles, counted from the third CA clock), supporting deterministic read and write transactions; register writes with zero latency.
 - **Clean-Room Specification**: Developed strictly from official vendor datasheets (Winbond & Gowin) without proprietary IP dependencies.
-- **Built-in Real-Time Pin Tracer**: Includes an on-chip logic analyzer (`psram_tracer`) that records 64 cycles of physical pin states (CS#, CK, OE, RWDS, DQ, FSM State, Timer) and prints them via UART for instant hardware diagnostics.
-- **100% Open-Source Toolchain**: Fully reproducible using `veryl`, `yosys`, `nextpnr`, `apycula`, `openFPGALoader`, and `iverilog`.
+- **Board Demo with Pin Tracer**: The Tang Nano 9K demo includes an on-chip logic analyzer (`psram_tracer`) that records 64 cycles of the PSRAM pins and FSM state and prints them via UART, and a full 8 MB memory test.
+- **100% Open-Source Toolchain**: Fully reproducible using `veryl`, `yosys`, `nextpnr`, `apycula`, `openFPGALoader`, `iverilog`, `verilator`, SymbiYosys/eqy and cocotb.
 - **SRAM-Only Safety**: Hardware verification runs entirely in volatile FPGA SRAM (`openFPGALoader -b tangnano9k pack.fs`), protecting the on-board SPI Flash memory from wear.
 
 ---
@@ -33,9 +37,12 @@ flowchart LR
         CPU["Host Bus / RISC-V CPU"]
     end
 
-    subgraph PSRAM_Ctrl ["psram_controller"]
+    subgraph PSRAM_Ctrl ["psram_controller (rtl/)"]
         Core["psram_core (FSM)"]
-        PHY["psram_phy (I/O & Tri-State)"]
+        PHY["psram_phy (CK & Tri-State I/O)"]
+    end
+
+    subgraph Demo ["demo/tangnano9k only"]
         Tracer["psram_tracer (Logic Analyzer)"]
     end
 
@@ -44,27 +51,28 @@ flowchart LR
         Die1["Winbond 32Mb Die 1\n(DQ[15:8], RWDS[1])"]
     end
 
-    CPU -->|"req, we, addr[23:0], wdata[31:0], wstrb[3:0]"| Core
-    Core -->|"rdata[31:0], ready, busy"| CPU
+    CPU -->|"req_valid, req_we, req_addr[23:0],\nreq_wdata[31:0], req_wstrb[3:0]"| Core
+    Core -->|"req_ready, rsp_valid,\nrsp_rdata[31:0], init_done"| CPU
     Core <--> PHY
     PHY <-->|"O_psram_ck, cs_n, reset_n\nIO_psram_dq, rwds"| SiP
-    Core -.->|"Sample Pins"| Tracer
+    PSRAM_Ctrl -.->|"dbg_sample"| Tracer
 ```
 
 ### Finite State Machine (FSM)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RESET_ASSERT: Power-On
-    RESET_ASSERT --> RESET_WAIT: tRP >= 200ns
-    RESET_WAIT --> IDLE: tVCS >= 150us
-    IDLE --> SEND_CA: req == 1 (Assert CS#)
-    SEND_CA --> WAIT_LATENCY: 6 DDR bytes sent
-    WAIT_LATENCY --> WRITE_DATA: we == 1 (12 clock cycles)
-    WAIT_LATENCY --> READ_DATA: we == 0 (12 clock cycles)
-    WRITE_DATA --> RECOVERY: Word 0 & 1 driven
-    READ_DATA --> RECOVERY: Word 0 & 1 sampled
-    RECOVERY --> IDLE: CS# deasserted (tRWR >= 36ns, pulse ready)
+    [*] --> RESET_ASSERT: rst_n
+    RESET_ASSERT --> RESET_WAIT: RESET# Low 400 ns (tRP >= 200 ns)
+    RESET_WAIT --> IDLE: 200 us (tVCS >= 150 us), init_done
+    IDLE --> SEND_CA: req_valid (req_ready), CS# Low
+    SEND_CA --> WAIT_LATENCY: 6 CA bytes sent (clocks 1-3)
+    SEND_CA --> WRITE_DATA: register write (zero latency)
+    WAIT_LATENCY --> WRITE_DATA: write, data on clock 15
+    WAIT_LATENCY --> READ_DATA: read, data on clock 15
+    WRITE_DATA --> RECOVERY: 2 half words driven, CS# High
+    READ_DATA --> RECOVERY: 2 half words sampled, CS# High
+    RECOVERY --> IDLE: tRWR >= 36 ns, rsp_valid
 ```
 
 ---
@@ -219,21 +227,11 @@ The tests run at 18 MHz (VUX9K) and 27 MHz (this board).
 | `dbg_sample` | Output | 32 | FSM/pin state for an on-chip tracer; leave unconnected if unused |
 
 One request is in flight at a time; `req_ready` is High again in the cycle of `rsp_valid`,
-so the next request can be accepted back-to-back. Register space: ID0 `0x800000`,
+so the next request can be accepted back-to-back. A request accepted in cycle 0 gets
+`rsp_valid` in cycle 35 (read), 34 (memory write) or 12 (register write)
+(checked by `test_latency` at 18 and 27 MHz). Register space: ID0 `0x800000`,
 ID1 `0x800004`, CR0 `0x800020`, CR1 `0x800024` (a register write loads `wdata[7:0]`/`[23:16]`
 into die 0 and `wdata[15:8]`/`[31:24]` into die 1).
-
----|---|---|---|
-| `clk` | Input | 1 | 27 MHz system clock |
-| `rst_n` | Input | 1 | Active-Low asynchronous reset |
-| `req` | Input | 1 | Access request pulse (assert for 1 cycle) |
-| `we` | Input | 1 | `1`: Write, `0`: Read |
-| `addr` | Input | 24 | Byte address (bit 23: `0` = Memory Space, `1` = Register Space) |
-| `wdata` | Input | 32 | 32-bit write word |
-| `wstrb` | Input | 4 | Byte write masks (`1`: write byte, `0`: mask) |
-| `rdata` | Output | 32 | 32-bit read word (valid when `ready` pulses) |
-| `ready` | Output | 1 | 1-cycle completion pulse |
-| `busy` | Output | 1 | High while a transaction is in progress |
 
 ---
 
