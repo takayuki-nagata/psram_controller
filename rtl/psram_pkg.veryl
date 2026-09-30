@@ -1,35 +1,29 @@
 // Copyright (c) 2026 Takayuki Nagata
 // SPDX-License-Identifier: MIT
 
-// Package for Tang Nano 9K PSRAM Controller
-// Clean-room implementation based on Winbond W955D8MBYA datasheet and Gowin IPUG943
+// Constants of the Tang Nano 9K PSRAM controller (Winbond W955D8MBYA datasheet).
 pub package psram_pkg {
-    // Timing requirements in ns (W955D8MBYA datasheet, sec. 11 and Table 14), with the
-    // margins used; psram_core converts them to cycles of its CLK_HZ, rounding up.
+    // Timing requirements in ns (datasheet sec. 11 and Table 14), with the margins used;
+    // psram_core converts them to cycles of its CLK_HZ, rounding up.
     const T_RP_NS : u64 = 400; // RESET# pulse width: tRP >= 200 ns (x2)
     const T_VCS_NS: u64 = 200_000; // RESET# High to first access: tVCS >= 150 us (+33 %)
     const T_RWR_NS: u64 = 36; // CS# High between transactions: tRWR >= 36 ns (and tCSHI >= 6 ns)
 
-    // Fixed latency mode: 2 * Initial Latency (Initial Latency = 6 PSRAM clock cycles)
-    // Total 12 PSRAM clock cycles = 24 system clock cycles
-    const FIXED_LATENCY_PSRAM_CLKS: u32 = 12;
+    // Initial latency in PSRAM clocks: the CR0[7:4] default (6 clocks, up to 166 MHz), used
+    // twice because CR0[3] (fixed latency) defaults to 1 (datasheet Table 8)
+    const INITIAL_LATENCY: u32 = 6;
 
-    // CA phase: 3 PSRAM clock cycles (6 DDR transfers) = 6 system clock cycles
-    const CA_PSRAM_CLKS: u32 = 3;
-
-    // Command-Address Bit fields
-    const CA_BIT_READ : logic = 1'b1;
-    const CA_BIT_WRITE: logic = 1'b0;
-
-    const CA_SPACE_MEM: logic = 1'b0;
-    const CA_SPACE_REG: logic = 1'b1;
-
-    const CA_BURST_WRAPPED: logic = 1'b0;
+    // Command-Address bits (datasheet 7.1)
+    const CA_READ         : logic = 1'b1; // CA[47]
+    const CA_WRITE        : logic = 1'b0;
+    const CA_SPACE_MEM    : logic = 1'b0; // CA[46]
+    const CA_SPACE_REG    : logic = 1'b1;
+    const CA_BURST_WRAPPED: logic = 1'b0; // CA[45]
     const CA_BURST_LINEAR : logic = 1'b1;
 
-    // HyperRAM Register Addresses
-    const REG_ID0: logic<16> = 16'h0000;
-    const REG_ID1: logic<16> = 16'h0001;
-    const REG_CR0: logic<16> = 16'h0100;
-    const REG_CR1: logic<16> = 16'h0101;
+    // Host addresses of the PSRAM registers (psram_controller req_addr, register space)
+    const REG_ADDR_ID0: logic<24> = 24'h80_0000;
+    const REG_ADDR_ID1: logic<24> = 24'h80_0004;
+    const REG_ADDR_CR0: logic<24> = 24'h80_0020;
+    const REG_ADDR_CR1: logic<24> = 24'h80_0024;
 }

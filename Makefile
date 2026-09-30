@@ -95,17 +95,18 @@ IP_SRCS := $(VERYL_OUT_DIR)/rtl/psram_pkg.sv \
            $(VERYL_OUT_DIR)/rtl/psram_phy.sv \
            $(VERYL_OUT_DIR)/rtl/psram_controller.sv
 
-# Verilator lint of the IP. Warnings are reported but not yet fatal: the RTL
-# clean-up that removes them is still to come.
+# Verilator lint of the IP, every warning fatal (waivers: scripts/lint.vlt)
 VERILATOR ?= verilator
 lint: $(VERYL_OUT_DIR)/.stamp
-	$(VERILATOR) --lint-only -Wall -Wno-fatal --top-module psram_controller $(IP_SRCS)
+	$(VERILATOR) --lint-only -Wall --top-module psram_controller scripts/lint.vlt $(IP_SRCS)
 
 # ===== Formal equivalence of a refactor against a base commit (default HEAD) =====
 EQY_BASE ?= HEAD
 EQY_TOP  ?= psram_controller
+EQY_NOMATCH ?=
 eqy: $(VERYL_OUT_DIR)/.stamp
-	$(PYTHON) scripts/run_eqy.py --base $(EQY_BASE) --top $(EQY_TOP) --veryl $(VERYL)
+	$(PYTHON) scripts/run_eqy.py --base $(EQY_BASE) --top $(EQY_TOP) --veryl $(VERYL) \
+		$(if $(EQY_NOMATCH),--nomatch $(EQY_NOMATCH))
 
 # ===== cocotb tests of the IP against the W955D8MBYA model (sim/) =====
 PYTEST_ARGS ?= -n auto

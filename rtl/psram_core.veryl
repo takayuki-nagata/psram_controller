@@ -1,8 +1,13 @@
 // Copyright (c) 2026 Takayuki Nagata
 // SPDX-License-Identifier: MIT
 
-// Core HyperBus protocol FSM for Tang Nano 9K internal PSRAM (Winbond W955D8MBYA)
-// Clean-room implementation based on official datasheets
+// HyperBus protocol FSM for the Tang Nano 9K internal PSRAM: two Winbond W955D8MBYA x8
+// dies in lockstep, one 32-bit host word per access (one 16-bit word in each die).
+// Clean-room implementation based on the vendor datasheets.
+//
+// The system clock runs at twice the PSRAM clock: every system cycle of a transaction is
+// one CK edge. psram_core changes CS#/DQ/RWDS on the rising edge of clk, psram_phy moves
+// CK on the falling edge, so data is center aligned to CK.
 pub module psram_core #(
     param CLK_HZ: u32 = 27_000_000, // System clock frequency (Hz); the PSRAM clock is CLK_HZ / 2
 ) (
@@ -20,7 +25,7 @@ pub module psram_core #(
     rsp_rdata: output logic<32>,
     init_done: output logic    ,
 
-    // Physical Interface to psram_phy_io
+    // Physical interface to psram_phy
     psram_ck_reg: output logic    ,
     ck_en       : output logic    ,
     cs_n_out    : output logic<2> ,
@@ -30,7 +35,6 @@ pub module psram_core #(
     dq_in       : input  logic<16>,
     rwds_oe     : output logic    ,
     rwds_out    : output logic<2> ,
-    rwds_in     : input  logic<2> ,
     dbg_state   : output logic<4> ,
     dbg_timer   : output logic<6> ,
 ) {
@@ -45,9 +49,29 @@ pub module psram_core #(
         RECOVERY,
     }
 
+    // ---------------------------------------------------------------- timing
+    // Datasheet requirements in system clock cycles (rounded up)
+    const RESET_PULSE_CYCLES: u64 = (psram_pkg::T_RP_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
+    const INIT_WAIT_CYCLES  : u64 = (psram_pkg::T_VCS_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
+    const CS_RECOVERY_CYCLES: u64 = (psram_pkg::T_RWR_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
+
+    // Fixed latency: 2 x initial latency PSRAM clocks, 2 system cycles each.
+    // The latency count starts with the third CA clock (datasheet Figures 9 and 11): with the
+    // CA on clocks 1..3, the first data word is on clock 15. WAIT_LATENCY starts after the
+    // rising edge of clock 4; in WAIT_LATENCY with timer = t, the CK edge at the end of the
+    // cycle is the rising edge of clock 15 when t = LATENCY_CYCLES - 3.
+    const LATENCY_CYCLES: u32 = 2 * 2 * psram_pkg::INITIAL_LATENCY;
+    // Write: word 0 is driven in the cycle whose CK edge is the rising edge of clock 15, and the
+    // RWDS preamble (Low) one PSRAM clock before that at the latest (Figure 11 note 3)
+    const WRITE_PREAMBLE_T: u32 = LATENCY_CYCLES - 6;
+    const WRITE_DATA_T    : u32 = LATENCY_CYCLES - 3;
+    // Read: enter READ_DATA one cycle before the rising edge of clock 15, which launches word 0
+    const READ_DATA_T: u32 = LATENCY_CYCLES - 4;
+
+    // ---------------------------------------------------------------- state
     var state      : State    ;
     var timer      : logic<16>;
-    var ca_shift   : logic<48>;
+    var ca_shift   : logic<48>; // Command-Address of the current transaction
     var r_we       : logic    ;
     var r_wdata    : logic<32>;
     var r_wstrb    : logic<4> ;
@@ -76,51 +100,39 @@ pub module psram_core #(
     assign rwds_out     = r_rwds_out;
     assign dbg_timer    = timer[5:0];
 
-    var dbg_state_r: logic<4>;
-    assign dbg_state = dbg_state_r;
-
+    // State number shown by the demo's pin tracer
     always_comb {
         case state {
-            State::RESET_ASSERT: dbg_state_r = 4'd0;
-            State::RESET_WAIT  : dbg_state_r = 4'd1;
-            State::IDLE        : dbg_state_r = 4'd2;
-            State::SEND_CA     : dbg_state_r = 4'd3;
-            State::WAIT_LATENCY: dbg_state_r = 4'd4;
-            State::WRITE_DATA  : dbg_state_r = 4'd5;
-            State::READ_DATA   : dbg_state_r = 4'd6;
-            State::RECOVERY    : dbg_state_r = 4'd7;
-            default            : dbg_state_r = 4'd15;
+            State::RESET_ASSERT: dbg_state = 4'd0;
+            State::RESET_WAIT  : dbg_state = 4'd1;
+            State::IDLE        : dbg_state = 4'd2;
+            State::SEND_CA     : dbg_state = 4'd3;
+            State::WAIT_LATENCY: dbg_state = 4'd4;
+            State::WRITE_DATA  : dbg_state = 4'd5;
+            State::READ_DATA   : dbg_state = 4'd6;
+            State::RECOVERY    : dbg_state = 4'd7;
+            default            : dbg_state = 4'd15;
         }
     }
 
-    // Datasheet timing in system clock cycles (rounded up)
-    const RESET_PULSE_CYCLES: u64 = (psram_pkg::T_RP_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
-    const INIT_WAIT_CYCLES  : u64 = (psram_pkg::T_VCS_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
-    const CS_RECOVERY_CYCLES: u64 = (psram_pkg::T_RWR_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
-
-    // 48-bit Command-Address packet (W955D8MBYA Table 2 & Table 5)
-    // Each 32-bit host word is one 16-bit word in each of the two x8 dies (die 0: DQ[7:0],
-    // die 1: DQ[15:8]), so the 21-bit die word address (A20..A0) is addr[22:2].
+    // ---------------------------------------------------------------- Command-Address
+    // 48-bit Command-Address (datasheet 7.1, Tables 3-5). Each 32-bit host word is one 16-bit
+    // word in each x8 die (die 0: DQ[7:0], die 1: DQ[15:8]), so the 21-bit die word address
+    // (A20..A0) is req_addr[22:2]; both dies receive the same CA. req_addr[1:0] is ignored.
     let word_addr: logic<21> = req_addr[22:2];
     let is_reg   : logic     = req_addr[23];
     let ca_packet: logic<48> = {
-        if req_we ? 1'b0 : 1'b1, // CA[47]: 1: Read, 0: Write
-        is_reg, // CA[46]: 0 = Memory Space, 1 = Register Space
-        is_reg, // CA[45]: 0 = Wrapped Burst for Memory, 1 = Register
-        11'b0, // CA[44:34]: Reserved
-        word_addr[20:9], // CA[33:22]: Row Address / Reg Addr
-        word_addr[8:3], // CA[21:16]: Upper Column
-        13'b0, // CA[15:3]: Reserved
-        word_addr[2:0], // CA[2:0]: Lower Column
+        if req_we ? psram_pkg::CA_WRITE : psram_pkg::CA_READ, // CA[47]
+        if is_reg ? psram_pkg::CA_SPACE_REG : psram_pkg::CA_SPACE_MEM, // CA[46]
+        if is_reg ? psram_pkg::CA_BURST_LINEAR : psram_pkg::CA_BURST_WRAPPED, // CA[45]
+        11'b0, // CA[44:34]: reserved
+        word_addr[20:9], // CA[33:22]: row address A20..A9
+        word_addr[8:3], // CA[21:16]: upper column address A8..A3
+        13'b0, // CA[15:3]: reserved
+        word_addr[2:0], // CA[2:0]: lower column address A2..A0
     };
 
-    // Fixed latency mode: 12 PSRAM clocks = 24 half-cycles (system cycles).
-    // The latency count starts with the third CA clock (datasheet Figures 9 and 11), so
-    // with the CA taking clocks 1..3 the first data word is transferred on clock 15.
-    // WAIT_LATENCY starts after the first rising edge of clock 4; with timer = t in
-    // WAIT_LATENCY the next CK edge is the rising edge of clock 15 when t = LATENCY_CYCLES - 3.
-    const LATENCY_CYCLES: logic<16> = 16'd24;
-
+    // ---------------------------------------------------------------- FSM
     always_ff (clk, rst_n) {
         if_reset {
             state       = State::RESET_ASSERT;
@@ -143,6 +155,7 @@ pub module psram_core #(
             r_rsp_valid = 1'b0;
 
             case state {
+                // RESET# Low for tRP
                 State::RESET_ASSERT: {
                     r_reset_n = 1'b0;
                     r_cs_n    = 1'b1;
@@ -159,6 +172,7 @@ pub module psram_core #(
                     }
                 }
 
+                // RESET# High for tVCS before the first access
                 State::RESET_WAIT: {
                     r_reset_n = 1'b1;
                     if (timer as u64) >= INIT_WAIT_CYCLES {
@@ -169,6 +183,7 @@ pub module psram_core #(
                     }
                 }
 
+                // Accept a request: CS# Low, CA byte 0 on DQ (captured by the first CK rise)
                 State::IDLE: {
                     r_cs_n    = 1'b1;
                     r_ck_en   = 1'b0;
@@ -182,52 +197,29 @@ pub module psram_core #(
                         r_wdata  = req_wdata;
                         r_wstrb  = req_wstrb;
                         ca_shift = ca_packet;
-                        r_cs_n   = 1'b0; // Assert CS#
-                        r_ck_en  = 1'b1; // Start clocking
+                        r_cs_n   = 1'b0;
+                        r_ck_en  = 1'b1;
                         r_ck     = 1'b0;
                         r_dq_oe  = 1'b1;
-                        // Put first CA byte on DQ
                         r_dq_out = {ca_packet[47:40], ca_packet[47:40]};
                         state    = State::SEND_CA;
                     }
                 }
 
+                // CA bytes 0..5 on the six CK edges of clocks 1..3 (byte 0 set in IDLE)
                 State::SEND_CA: {
-                    // Toggle CK on every 27MHz system cycle
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
-
-                    // 6 half-cycles of CA:
-                    // Cycle 1: r_ck=1, DQ=Byte 0. Negedge clk: CK rises -> captures Byte 0!
-                    // Cycle 2: r_ck=0, DQ=Byte 1. Negedge clk: CK falls -> captures Byte 1!
-                    // Cycle 3: r_ck=1, DQ=Byte 2. Negedge clk: CK rises -> captures Byte 2!
-                    // Cycle 4: r_ck=0, DQ=Byte 3. Negedge clk: CK falls -> captures Byte 3!
-                    // Cycle 5: r_ck=1, DQ=Byte 4. Negedge clk: CK rises -> captures Byte 4!
-                    // Cycle 6: r_ck=0, DQ=Byte 5. Negedge clk: CK falls -> captures Byte 5!
-                    // Cycle 7: CA complete! Release DQ, enter latency.
                     case timer {
-                        16'd0: {
-                            // Keep Byte 0 stable for rising edge 1
-                        }
-                        16'd1: {
-                            r_dq_out = {ca_shift[39:32], ca_shift[39:32]};
-                        }
-                        16'd2: {
-                            r_dq_out = {ca_shift[31:24], ca_shift[31:24]};
-                        }
-                        16'd3: {
-                            r_dq_out = {ca_shift[23:16], ca_shift[23:16]};
-                        }
-                        16'd4: {
-                            r_dq_out = {ca_shift[15:8], ca_shift[15:8]};
-                        }
-                        16'd5: {
-                            r_dq_out = {ca_shift[7:0], ca_shift[7:0]};
-                        }
+                        16'd0: {} // byte 0 stays for the first rising edge
+                        16'd1  : r_dq_out = {ca_shift[39:32], ca_shift[39:32]};
+                        16'd2  : r_dq_out = {ca_shift[31:24], ca_shift[31:24]};
+                        16'd3  : r_dq_out = {ca_shift[23:16], ca_shift[23:16]};
+                        16'd4  : r_dq_out = {ca_shift[15:8], ca_shift[15:8]};
+                        16'd5  : r_dq_out = {ca_shift[7:0], ca_shift[7:0]};
                         default: {
-                            // CA send complete (6 half-cycles = 3 full PSRAM clock cycles)
                             timer = 16'd0;
-                            if r_we && ca_shift[46] {
+                            if r_we && ca_shift[46] == psram_pkg::CA_SPACE_REG {
                                 // Register write: zero latency, the data word follows the CA
                                 // on clock 4 and RWDS is not driven (datasheet 7.4, 9.2)
                                 r_dq_out = r_wdata[15:0];
@@ -244,17 +236,12 @@ pub module psram_core #(
                 State::WAIT_LATENCY: {
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
-
-                    // RWDS preamble: Low for one PSRAM clock before the write data
-                    // (datasheet Figure 11 note 3)
-                    if r_we && (timer >= (LATENCY_CYCLES - 16'd6)) {
-                        r_rwds_oe  = 1'b1;
-                        r_rwds_out = 2'b00;
-                    }
-
                     if r_we {
-                        // Word 0 is captured on the rising edge of clock 15
-                        if timer >= (LATENCY_CYCLES - 16'd3) {
+                        if (timer as u32) >= WRITE_PREAMBLE_T {
+                            r_rwds_oe  = 1'b1;
+                            r_rwds_out = 2'b00;
+                        }
+                        if (timer as u32) >= WRITE_DATA_T {
                             timer      = 16'd0;
                             r_dq_oe    = 1'b1;
                             r_dq_out   = r_wdata[15:0];
@@ -262,46 +249,39 @@ pub module psram_core #(
                             r_rwds_out = {~r_wstrb[1], ~r_wstrb[0]};
                             state      = State::WRITE_DATA;
                         }
-                    } else {
-                        // The rising edge of clock 15 (next cycle) launches read word 0
-                        if timer >= (LATENCY_CYCLES - 16'd4) {
-                            timer   = 16'd0;
-                            r_dq_oe = 1'b0;
-                            state   = State::READ_DATA;
-                        }
+                    } else if (timer as u32) >= READ_DATA_T {
+                        timer   = 16'd0;
+                        r_dq_oe = 1'b0;
+                        state   = State::READ_DATA;
                     }
                 }
 
+                // timer 0: word 0 on the CK rising edge; timer 1: word 1 on the falling edge
                 State::WRITE_DATA: {
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
-
-                    case timer {
-                        16'd0: {
-                            r_dq_out   = r_wdata[31:16];
-                            r_rwds_out = {~r_wstrb[3], ~r_wstrb[2]};
-                        }
-                        default: {
-                            r_dq_oe   = 1'b0;
-                            r_rwds_oe = 1'b0;
-                            r_cs_n    = 1'b1; // De-assert CS#
-                            r_ck_en   = 1'b0;
-                            r_ck      = 1'b0;
-                            timer     = 16'd0;
-                            state     = State::RECOVERY;
-                        }
+                    if timer == 16'd0 {
+                        r_dq_out   = r_wdata[31:16];
+                        r_rwds_out = {~r_wstrb[3], ~r_wstrb[2]};
+                    } else {
+                        r_dq_oe   = 1'b0;
+                        r_rwds_oe = 1'b0;
+                        r_cs_n    = 1'b1;
+                        r_ck_en   = 1'b0;
+                        r_ck      = 1'b0;
+                        timer     = 16'd0;
+                        state     = State::RECOVERY;
                     }
                 }
 
+                // timer 0: CK rises (clock 15), the PSRAM launches word 0
+                // timer 1: sample word 0 (half a system cycle after the CK edge); CK falls
+                // timer 2: sample word 1; stop CK
+                // timer 3: raise CS#; it stayed Low one more cycle so that the last word is
+                //          still driven when sampled (datasheet Table 14 note 3)
                 State::READ_DATA: {
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
-
-                    // timer 0: CK rises (clock 15), the PSRAM launches word 0
-                    // timer 1: sample word 0 (half a system cycle after the CK edge); CK falls
-                    // timer 2: sample word 1; stop CK
-                    // timer 3: raise CS#; it stayed Low one more cycle so that the last word
-                    //          is still driven when sampled (datasheet Table 14 note 3)
                     if timer == 16'd1 {
                         r_rdata[15:0] = dq_in;
                     } else if timer == 16'd2 {
@@ -309,7 +289,7 @@ pub module psram_core #(
                         r_ck_en        = 1'b0;
                         r_ck           = 1'b0;
                     } else if timer >= 16'd3 {
-                        r_cs_n  = 1'b1; // De-assert CS#
+                        r_cs_n  = 1'b1;
                         r_ck_en = 1'b0;
                         r_ck    = 1'b0;
                         timer   = 16'd0;
@@ -317,12 +297,13 @@ pub module psram_core #(
                     }
                 }
 
+                // CS# High for tRWR, then respond
                 State::RECOVERY: {
                     r_cs_n  = 1'b1;
                     r_ck_en = 1'b0;
                     r_ck    = 1'b0;
                     if (timer as u64) >= CS_RECOVERY_CYCLES {
-                        r_rsp_valid = 1'b1; // One-cycle response
+                        r_rsp_valid = 1'b1;
                         timer       = 16'd0;
                         state       = State::IDLE;
                     } else {

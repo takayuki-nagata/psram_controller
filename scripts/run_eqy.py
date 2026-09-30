@@ -71,7 +71,7 @@ def snapshot(files: list[Path], dst: Path) -> list[Path]:
     return out
 
 
-def eqy_config(top: str, gold: list[Path], gate: list[Path], depth: int) -> str:
+def eqy_config(top: str, gold: list[Path], gate: list[Path], depth: int, nomatch: list[str]) -> str:
     def side(name, files):
         return (
             f"[{name}]\n"
@@ -81,11 +81,13 @@ def eqy_config(top: str, gold: list[Path], gate: list[Path], depth: int) -> str:
             "memory_map\n"
         )
 
+    match = "\n[match *]\n" + "".join(f"gold-nomatch {p}\ngate-nomatch {p}\n" for p in nomatch) if nomatch else ""
     return (
         side("gold", gold)
         + "\n"
         + side("gate", gate)
         + "\n[options]\ninsbuf off\n"
+        + match
         + f"\n[strategy sby]\nuse sby\ndepth {depth}\nengine smtbmc bitwuzla\n"
     )
 
@@ -97,6 +99,12 @@ def main():
     parser.add_argument("--depth", type=int, default=5, help="sby induction depth per partition (default: 5)")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--veryl", default=os.environ.get("VERYL", "veryl"))
+    parser.add_argument(
+        "--nomatch",
+        nargs="*",
+        default=[],
+        help="Net-name patterns not to match between gold and gate (e.g. 'u_core.ca_packet*')",
+    )
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -111,7 +119,7 @@ def main():
     gold = snapshot(gold_files, work / "gold")
     gate = snapshot(rtl_files(REPO_ROOT, gate_out), work / "gate")
     config = work / f"{args.top}.eqy"
-    config.write_text(eqy_config(args.top, gold, gate, args.depth))
+    config.write_text(eqy_config(args.top, gold, gate, args.depth, args.nomatch))
 
     print(f"=== eqy: {args.top} of the working tree vs {args.base} (log: {work / args.top / 'logfile.txt'}) ===")
     result = subprocess.run(["eqy", "-f", "-j", str(args.jobs), config.name], cwd=work)

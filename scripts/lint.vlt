@@ -1,0 +1,11 @@
+`verilator_config
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Waivers for `make lint` (Verilator -Wall on the IP), each by design:
+// - psram_pkg::REG_ADDR_*: register addresses exported for users of the IP
+lint_off -rule UNUSEDPARAM -file "*/psram_pkg.sv" -match "*REG_ADDR_*"
+// - req_addr[1:0]: accesses are whole 32-bit words
+lint_off -rule UNUSEDSIGNAL -file "*/psram_core.sv" -match "*'req_addr'*"
+// - ca_shift[47,45:40]: CA byte 0 goes out from ca_packet when the request is accepted
+lint_off -rule UNUSEDSIGNAL -file "*/psram_core.sv" -match "*'ca_shift'*"

@@ -81,7 +81,6 @@ pub module psram_controller #(
         dq_in       : dq_in_sig   ,
         rwds_oe     : rwds_oe_sig ,
         rwds_out    : rwds_out_sig,
-        rwds_in     : rwds_in_sig ,
         dbg_state                 ,
         dbg_timer                 ,
     );
