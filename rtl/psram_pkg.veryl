@@ -4,17 +4,11 @@
 // Package for Tang Nano 9K PSRAM Controller
 // Clean-room implementation based on Winbond W955D8MBYA datasheet and Gowin IPUG943
 pub package psram_pkg {
-    // Clock parameters
-    // Input system clock = 27MHz (37.037ns period)
-    // PSRAM clock = 13.5MHz (74.074ns period, 2 system clocks per PSRAM clock cycle)
-    const CLK_HZ: u32 = 27000000;
-
-    // Reset timing parameters
-    // tRP (RESET# pulse width) >= 200ns -> 27MHz * 200ns = 5.4 cycles -> 16 cycles (592ns)
-    const RESET_PULSE_CYCLES: u32 = 16;
-
-    // tVCS (Power-up/Reset to first access) <= 150us -> 27MHz * 150us = 4050 cycles -> 16384 cycles (~600us safe margin)
-    const INIT_WAIT_CYCLES: u32 = 16384;
+    // Timing requirements in ns (W955D8MBYA datasheet, sec. 11 and Table 14), with the
+    // margins used; psram_core converts them to cycles of its CLK_HZ, rounding up.
+    const T_RP_NS : u64 = 400; // RESET# pulse width: tRP >= 200 ns (x2)
+    const T_VCS_NS: u64 = 200_000; // RESET# High to first access: tVCS >= 150 us (+33 %)
+    const T_RWR_NS: u64 = 36; // CS# High between transactions: tRWR >= 36 ns (and tCSHI >= 6 ns)
 
     // Fixed latency mode: 2 * Initial Latency (Initial Latency = 6 PSRAM clock cycles)
     // Total 12 PSRAM clock cycles = 24 system clock cycles
@@ -22,9 +16,6 @@ pub package psram_pkg {
 
     // CA phase: 3 PSRAM clock cycles (6 DDR transfers) = 6 system clock cycles
     const CA_PSRAM_CLKS: u32 = 3;
-
-    // tRWR (CS# high recovery time) >= 36ns -> 2 PSRAM clock cycles = 4 system clock cycles
-    const CS_RECOVERY_CYCLES: u32 = 4;
 
     // Command-Address Bit fields
     const CA_BIT_READ : logic = 1'b1;
@@ -41,8 +32,4 @@ pub package psram_pkg {
     const REG_ID1: logic<16> = 16'h0001;
     const REG_CR0: logic<16> = 16'h0100;
     const REG_CR1: logic<16> = 16'h0101;
-
-    // UART configuration
-    const UART_BAUD: u32 = 115200;
-    const UART_CNT : u32 = CLK_HZ / UART_BAUD; // 27MHz / 115200 = 234
 }

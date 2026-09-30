@@ -44,6 +44,7 @@ def test_controller(mhz, testcase):
         "tb_psram_controller",
         "test_psram_controller",
         testcase=testcase,
-        run_name=f"{testcase}_{mhz}MHz",
+        run_name=testcase,
+        parameters={"CLK_HZ": mhz * 1_000_000},
         extra_env={"PSRAM_CLK_MHZ": str(mhz)},
     )

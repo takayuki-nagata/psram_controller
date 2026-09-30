@@ -72,11 +72,16 @@ def run(
     *,
     testcase: str | None = None,
     run_name: str | None = None,
+    parameters: dict[str, int] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> Path:
-    """Compile (if outdated) and run one cocotb test module against toplevel."""
+    """Compile (if outdated) and run one cocotb test module against toplevel.
+
+    Each set of toplevel parameters gets its own build directory."""
     sim = os.environ.get("SIM", "icarus")
-    build_dir = SIM_BUILD_DIR / sim / toplevel
+    parameters = parameters or {}
+    variant = "_".join([toplevel] + [f"{k}{v}" for k, v in sorted(parameters.items())])
+    build_dir = SIM_BUILD_DIR / sim / variant
     test_dir = build_dir / f"run_{run_name or module}"
 
     sources = TOPLEVELS[toplevel]
@@ -88,12 +93,13 @@ def run(
         sys.path.insert(0, str(TEST_MODULE_DIR))
 
     runner = get_runner(sim)
-    with _exclusive(build_dir.with_name(f"{toplevel}.lock")):
+    with _exclusive(build_dir.with_name(f"{variant}.lock")):
         runner.build(
             sources=sources,
             hdl_toplevel=toplevel,
             build_dir=build_dir,
             build_args=BUILD_ARGS[sim],
+            parameters=parameters,
             timescale=("1ns", "1ps"),
         )
 

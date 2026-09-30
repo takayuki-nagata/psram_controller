@@ -3,7 +3,9 @@
 
 // Top-level PSRAM controller module for Tang Nano 9K
 // Integrates HyperBus core FSM and physical IO buffers
-pub module psram_controller (
+pub module psram_controller #(
+    param CLK_HZ: u32 = 27_000_000, // System clock frequency (Hz), 18-27 MHz verified
+) (
     clk  : input clock          ,
     rst_n: input reset_async_low,
 
@@ -44,7 +46,9 @@ pub module psram_controller (
         dbg_state, cs_n_sig[0], psram_ck_reg, dq_oe_sig, rwds_oe_sig, rwds_in_sig, dbg_timer[5:0], dq_in_sig
     };
 
-    inst u_core: psram_core (
+    inst u_core: psram_core #(
+        CLK_HZ  ,
+    ) (
         clk                       ,
         rst_n                     ,
         req                       ,

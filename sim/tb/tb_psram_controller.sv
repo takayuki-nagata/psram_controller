@@ -5,7 +5,9 @@
 // The clock and the host interface are driven from Python (sim/tests/).
 `timescale 1ns / 1ps
 
-module tb_psram_controller;
+module tb_psram_controller #(
+    parameter integer CLK_HZ = 27_000_000
+);
     reg         clk = 1'b0;
     reg         rst_n = 1'b0;
     reg         req = 1'b0;
@@ -25,7 +27,9 @@ module tb_psram_controller;
     wire [15:0] psram_dq;
     wire [1:0]  psram_rwds;
 
-    psram_controller dut (
+    psram_controller #(
+        .CLK_HZ(CLK_HZ)
+    ) dut (
         .clk            (clk),
         .rst_n          (rst_n),
         .req            (req),

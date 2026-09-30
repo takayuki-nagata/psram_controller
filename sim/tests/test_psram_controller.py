@@ -49,7 +49,7 @@ async def test_init(dut):
     while dut.busy.value == 1:
         await FallingEdge(dut.clk)
         cycles += 1
-        assert cycles * env.period_ps / 1000 < 2 * T_VCS_NS * 10, "initialization takes too long"
+        assert cycles * env.period_ps / 1000 < 2 * T_VCS_NS, "initialization takes too long"
     assert cycles * env.period_ps / 1000 >= T_VCS_NS, "initialization shorter than tVCS"
     await env.finish()
 

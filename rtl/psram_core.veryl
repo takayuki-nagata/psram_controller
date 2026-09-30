@@ -3,8 +3,10 @@
 
 // Core HyperBus protocol FSM for Tang Nano 9K internal PSRAM (Winbond W955D8MBYA)
 // Clean-room implementation based on official datasheets
-pub module psram_core (
-    clk  : input clock          , // System clock: 27MHz
+pub module psram_core #(
+    param CLK_HZ: u32 = 27_000_000, // System clock frequency (Hz); the PSRAM clock is CLK_HZ / 2
+) (
+    clk  : input clock          , // System clock
     rst_n: input reset_async_low,
 
     // Host / User Bus Interface
@@ -89,6 +91,11 @@ pub module psram_core (
         }
     }
 
+    // Datasheet timing in system clock cycles (rounded up)
+    const RESET_PULSE_CYCLES: u64 = (psram_pkg::T_RP_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
+    const INIT_WAIT_CYCLES  : u64 = (psram_pkg::T_VCS_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
+    const CS_RECOVERY_CYCLES: u64 = (psram_pkg::T_RWR_NS * (CLK_HZ as u64) + 999_999_999) / 1_000_000_000;
+
     // 48-bit Command-Address packet (W955D8MBYA Table 2 & Table 5)
     // Each 32-bit host word is one 16-bit word in each of the two x8 dies (die 0: DQ[7:0],
     // die 1: DQ[15:8]), so the 21-bit die word address (A20..A0) is addr[22:2].
@@ -141,7 +148,7 @@ pub module psram_core (
                     r_ck      = 1'b0;
                     r_dq_oe   = 1'b0;
                     r_rwds_oe = 1'b0;
-                    if (timer as u32) >= psram_pkg::RESET_PULSE_CYCLES {
+                    if (timer as u64) >= RESET_PULSE_CYCLES {
                         r_reset_n = 1'b1;
                         timer     = 16'd0;
                         state     = State::RESET_WAIT;
@@ -152,7 +159,7 @@ pub module psram_core (
 
                 State::RESET_WAIT: {
                     r_reset_n = 1'b1;
-                    if (timer as u32) >= psram_pkg::INIT_WAIT_CYCLES {
+                    if (timer as u64) >= INIT_WAIT_CYCLES {
                         timer = 16'd0;
                         state = State::IDLE;
                     } else {
@@ -312,7 +319,7 @@ pub module psram_core (
                     r_cs_n  = 1'b1;
                     r_ck_en = 1'b0;
                     r_ck    = 1'b0;
-                    if (timer as u32) >= psram_pkg::CS_RECOVERY_CYCLES {
+                    if (timer as u64) >= CS_RECOVERY_CYCLES {
                         r_ready = 1'b1; // Pulse ready to host
                         timer   = 16'd0;
                         state   = State::IDLE;
