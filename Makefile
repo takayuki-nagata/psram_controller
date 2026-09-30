@@ -76,7 +76,7 @@ veryl-demo: $(DEMO_VERYL_DIR)/.stamp
 # Controller IP as seen by a user of the Veryl dependency (modules prefixed "psram_")
 DEMO_IP_SRCS := $(DEMO_VERYL_DIR)/dependencies/psram/rtl/psram_pkg.sv \
                 $(DEMO_VERYL_DIR)/dependencies/psram/rtl/psram_core.sv \
-                rtl/psram_phy_io.sv \
+                $(DEMO_VERYL_DIR)/dependencies/psram/rtl/psram_phy.sv \
                 $(DEMO_VERYL_DIR)/dependencies/psram/rtl/psram_controller.sv
 
 DEMO_SRCS := $(DEMO_IP_SRCS) \
@@ -92,7 +92,7 @@ DEMO_SRCS := $(DEMO_IP_SRCS) \
 # Controller IP sources, compilation order (packages first)
 IP_SRCS := $(VERYL_OUT_DIR)/rtl/psram_pkg.sv \
            $(VERYL_OUT_DIR)/rtl/psram_core.sv \
-           rtl/psram_phy_io.sv \
+           $(VERYL_OUT_DIR)/rtl/psram_phy.sv \
            $(VERYL_OUT_DIR)/rtl/psram_controller.sv
 
 # Verilator lint of the IP. Warnings are reported but not yet fatal: the RTL
@@ -121,7 +121,7 @@ sim-demo: $(DEMO_VERYL_DIR)/.stamp
 	$(VVP) $(DEMO_SIM_DIR)/tb_psram_top
 
 # ===== Demo: synthesis, place and route, bitstream =====
-$(DEMO_SYNTH_DIR)/psram.json: $(DEMO_VERYL_DIR)/.stamp rtl/psram_phy_io.sv
+$(DEMO_SYNTH_DIR)/psram.json: $(DEMO_VERYL_DIR)/.stamp
 	@mkdir -p $(DEMO_SYNTH_DIR)
 	$(YOSYS) -p "\
 		read_verilog -sv $(DEMO_SRCS); \

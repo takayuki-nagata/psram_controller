@@ -35,7 +35,7 @@ flowchart LR
 
     subgraph PSRAM_Ctrl ["psram_controller"]
         Core["psram_core (FSM)"]
-        PHY["psram_phy_io (I/O & Tri-State)"]
+        PHY["psram_phy (I/O & Tri-State)"]
         Tracer["psram_tracer (Logic Analyzer)"]
     end
 
@@ -95,7 +95,7 @@ The two 32Mbit x8 PSRAM dies are packaged in SiP and internally bonded to FPGA B
 ├── rtl/                       # Controller IP
 │   ├── psram_pkg.veryl        # Timing parameters & constants
 │   ├── psram_core.veryl       # HyperBus protocol FSM
-│   ├── psram_phy_io.sv        # Physical layer tri-state & center-aligned clock IO
+│   ├── psram_phy.veryl        # Physical layer tri-state & center-aligned clock IO
 │   └── psram_controller.veryl # Top controller wrapper
 ├── sim/
 │   └── model/

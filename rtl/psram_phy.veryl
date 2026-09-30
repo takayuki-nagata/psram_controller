@@ -1,0 +1,59 @@
+// Copyright (c) 2026 Takayuki Nagata
+// SPDX-License-Identifier: MIT
+
+// Physical layer for the Tang Nano 9K internal PSRAM (two W955D8MBYA dies in lockstep):
+// PSRAM clock generation and the DQ/RWDS tri-state buffers.
+pub module psram_phy (
+    clk  : input 'a clock          , // System clock
+    rst_n: input 'a reset_async_low,
+
+    psram_ck_reg: input  'a logic    , // PSRAM clock level from psram_core (updated on posedge clk)
+    ck_en       : input  'a logic    , // 1: output psram_ck_reg, 0: hold CK Low
+    cs_n_in     : input  'a logic<2> , // Chip select (active Low)
+    reset_n_in  : input  'a logic<2> , // Hardware reset (active Low)
+    dq_oe       : input  'a logic    , // 1: FPGA drives DQ
+    dq_out      : input  'a logic<16>,
+    dq_in       : output 'a logic<16>,
+    rwds_oe     : input  'a logic    , // 1: FPGA drives RWDS (write mask)
+    rwds_out    : input  'a logic<2> , // Write mask: 0 = write the byte, 1 = mask it
+    rwds_in     : output 'a logic<2> ,
+
+    // FPGA pins connected to the internal PSRAM
+    O_psram_ck     : output 'a logic    <2> ,
+    O_psram_ck_n   : output 'a logic    <2> ,
+    O_psram_cs_n   : output 'a logic    <2> ,
+    O_psram_reset_n: output 'a logic    <2> ,
+    IO_psram_dq    : inout  'a tri logic<16>,
+    IO_psram_rwds  : inout  'a tri logic<2> ,
+) {
+    // The PSRAM clock is registered on the falling edge of clk, while psram_core changes
+    // DQ/CA on the rising edge: every CK edge is a quarter PSRAM clock period after the
+    // data changed, i.e. data is center aligned to CK with half a system clock of setup
+    // and hold.
+    var clk_n: 'a clock_negedge;
+    assign clk_n = clk;
+
+    var psram_ck_q: 'a logic;
+    always_ff (clk_n, rst_n) {
+        if_reset {
+            psram_ck_q = 1'b0;
+        } else {
+            psram_ck_q = if ck_en ? psram_ck_reg : 1'b0;
+        }
+    }
+
+    assign O_psram_ck      = {psram_ck_q, psram_ck_q};
+    assign O_psram_ck_n    = {~psram_ck_q, ~psram_ck_q};
+    assign O_psram_cs_n    = cs_n_in;
+    assign O_psram_reset_n = reset_n_in;
+
+    for i in 0..16 :g_dq {
+        assign IO_psram_dq[i] = if dq_oe ? dq_out[i] : 'z;
+    }
+    assign dq_in = IO_psram_dq;
+
+    for i in 0..2 :g_rwds {
+        assign IO_psram_rwds[i] = if rwds_oe ? rwds_out[i] : 'z;
+    }
+    assign rwds_in = IO_psram_rwds;
+}
