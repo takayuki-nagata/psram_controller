@@ -217,10 +217,17 @@ pub module psram_core (
                         }
                         default: {
                             // CA send complete (6 half-cycles = 3 full PSRAM clock cycles)
-                            r_dq_oe  = 1'b0;
-                            r_dq_out = 16'd0;
-                            timer    = 16'd0;
-                            state    = State::WAIT_LATENCY;
+                            timer = 16'd0;
+                            if r_we && ca_shift[46] {
+                                // Register write: zero latency, the data word follows the CA
+                                // on clock 4 and RWDS is not driven (datasheet 7.4, 9.2)
+                                r_dq_out = r_wdata[15:0];
+                                state    = State::WRITE_DATA;
+                            } else {
+                                r_dq_oe  = 1'b0;
+                                r_dq_out = 16'd0;
+                                state    = State::WAIT_LATENCY;
+                            }
                         }
                     }
                 }

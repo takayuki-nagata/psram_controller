@@ -15,10 +15,7 @@ CLK_MHZ = [18, 27]
 
 # Known controller bugs, found by these tests; strict, so fixing one fails the run until
 # its entry is removed here.
-REG_WRITE = "register writes use the memory write latency instead of zero latency"
-KNOWN_BUGS = {
-    "test_cr0_write": REG_WRITE,
-}
+KNOWN_BUGS: dict[str, str] = {}
 
 TESTS = [
     "test_init",
