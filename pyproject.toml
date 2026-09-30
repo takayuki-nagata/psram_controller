@@ -7,7 +7,7 @@
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-include = ["sim/**/*.py", "demo/**/*.py"]
+include = ["sim/**/*.py", "demo/**/*.py", "scripts/**/*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "ASYNC", "RUF006"]

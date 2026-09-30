@@ -33,7 +33,7 @@ DEMO_SIM_DIR   := $(DEMO_BUILD_DIR)/sim
 DEMO_SYNTH_DIR := $(DEMO_BUILD_DIR)/synth
 CST_FILE       := $(DEMO_DIR)/tangnano9k.cst
 
-.PHONY: all setup fmt check lint test test-sim veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
+.PHONY: all setup fmt check lint eqy test test-sim veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
 
 all: test bitstream
 
@@ -100,6 +100,12 @@ IP_SRCS := $(VERYL_OUT_DIR)/rtl/psram_pkg.sv \
 VERILATOR ?= verilator
 lint: $(VERYL_OUT_DIR)/.stamp
 	$(VERILATOR) --lint-only -Wall -Wno-fatal --top-module psram_controller $(IP_SRCS)
+
+# ===== Formal equivalence of a refactor against a base commit (default HEAD) =====
+EQY_BASE ?= HEAD
+EQY_TOP  ?= psram_controller
+eqy: $(VERYL_OUT_DIR)/.stamp
+	$(PYTHON) scripts/run_eqy.py --base $(EQY_BASE) --top $(EQY_TOP) --veryl $(VERYL)
 
 # ===== cocotb tests of the IP against the W955D8MBYA model (sim/) =====
 PYTEST_ARGS ?= -n auto
