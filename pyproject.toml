@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Takayuki Nagata
+# SPDX-License-Identifier: MIT
+
+# Tool configuration only (the Python here is testbench code, not a package).
+# Dependencies are installed by `make setup` / CI.
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+include = ["sim/**/*.py", "demo/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "ASYNC", "RUF006"]
+
+[tool.ruff.lint.per-file-ignores]
+"sim/**/*.py" = ["ASYNC2"]
+
+[tool.pytest.ini_options]
+testpaths = ["sim"]
+python_files = ["test_sim.py"]
+pythonpath = ["sim"]
+cache_dir = "build/pytest_cache"
+addopts = "--strict-markers"

@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+
 import serial
 
 
@@ -34,11 +35,17 @@ def analyze_trace(trace_lines):
         7: "RECOVERY",
     }
 
-    print(f"{'CYC':>4} | {'STATE':<12} | {'TM':>2} | {'CS#':>3} {'CK':>2} {'OE':>2} | {'RWDS':>4} | {'DQ[15:8]':>8} {'DQ[7:0]':>7} | NOTES")
+    print(
+        f"{'CYC':>4} | {'STATE':<12} | {'TM':>2} | {'CS#':>3} {'CK':>2} {'OE':>2} | "
+        f"{'RWDS':>4} | {'DQ[15:8]':>8} {'DQ[7:0]':>7} | NOTES"
+    )
     print("-" * 65)
 
     for line in trace_lines:
-        m = re.match(r"C([0-9A-F]{2}):\s*([0-9A-F])\s+([0-9A-F]{2})\s+([01])\s+([01])\s+([01])\s+([01]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})", line.strip())
+        m = re.match(
+            r"C([0-9A-F]{2}):\s*([0-9A-F])\s+([0-9A-F]{2})\s+([01])\s+([01])\s+([01])\s+([01]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})",
+            line.strip(),
+        )
         if not m:
             continue
 
@@ -72,7 +79,10 @@ def analyze_trace(trace_lines):
     print("-" * 65)
     print("=== DIAGNOSTIC SUMMARY ===")
     if chip_active:
-        print(f"[*] CHIP RESPONSE DETECTED! First response at cycle {response_cycles[0][0]}: DQ=0x{response_cycles[0][1]}{response_cycles[0][2]}, RWDS={response_cycles[0][3]}")
+        print(
+            f"[*] CHIP RESPONSE DETECTED! First response at cycle {response_cycles[0][0]}: "
+            f"DQ=0x{response_cycles[0][1]}{response_cycles[0][2]}, RWDS={response_cycles[0][3]}"
+        )
         for c, d1, d0, rw in response_cycles:
             print(f"    - Cycle {c:2d}: DQ[15:8]=0x{d1} DQ[7:0]=0x{d0} RWDS={rw}")
         # Check ID0 value

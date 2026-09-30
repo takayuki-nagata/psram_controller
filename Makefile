@@ -7,12 +7,15 @@
 # demo/tangnano9k/ board demo (separate Veryl project depending on the IP)
 # All generated files go under build/.
 
+VENV_PATH ?= .venv
+UV ?= uv
 VERYL ?= veryl
 YOSYS ?= yosys
 NEXTPNR ?= nextpnr-himbaechel
 GOWIN_PACK ?= gowin_pack
 OPENFPGALOADER ?= openFPGALoader
-PYTHON ?= python3
+PYTHON ?= $(if $(wildcard $(VENV_PATH)/bin/python),$(VENV_PATH)/bin/python,python3)
+RUFF ?= $(PYTHON) -m ruff
 IVERILOG ?= iverilog
 VVP ?= vvp
 SERIAL_PORT ?= /dev/ttyUSB3
@@ -30,20 +33,28 @@ DEMO_SIM_DIR   := $(DEMO_BUILD_DIR)/sim
 DEMO_SYNTH_DIR := $(DEMO_BUILD_DIR)/synth
 CST_FILE       := $(DEMO_DIR)/tangnano9k.cst
 
-.PHONY: all fmt check lint veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
+.PHONY: all setup fmt check lint test test-sim veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
 
-all: sim-demo bitstream
+all: test bitstream
+
+# ===== Python environment (cocotb, pytest), same versions as VUX9K =====
+setup:
+	$(UV) venv --python 3.13 $(VENV_PATH)
+	$(UV) pip install --python $(VENV_PATH)/bin/python cocotb==2.0.1 pytest==9.1.1 pytest-xdist pyserial ruff==0.16.8
 
 # ===== Code quality =====
 fmt:
 	$(VERYL) fmt
 	cd $(DEMO_DIR) && $(VERYL) fmt
+	$(RUFF) format
 
 check:
 	$(VERYL) fmt --check
 	$(VERYL) check
 	cd $(DEMO_DIR) && $(VERYL) fmt --check
 	cd $(DEMO_DIR) && $(VERYL) check
+	$(RUFF) format --check
+	$(RUFF) check
 
 # ===== Veryl build =====
 IP_VERYL_SRCS   := $(wildcard rtl/*.veryl) Veryl.toml
@@ -89,6 +100,13 @@ IP_SRCS := $(VERYL_OUT_DIR)/rtl/psram_pkg.sv \
 VERILATOR ?= verilator
 lint: $(VERYL_OUT_DIR)/.stamp
 	$(VERILATOR) --lint-only -Wall -Wno-fatal --top-module psram_controller $(IP_SRCS)
+
+# ===== cocotb tests of the IP against the W955D8MBYA model (sim/) =====
+PYTEST_ARGS ?= -n auto
+test-sim: $(VERYL_OUT_DIR)/.stamp
+	$(PYTHON) -m pytest $(PYTEST_ARGS) sim/test_sim.py
+
+test: check lint test-sim sim-demo
 
 # ===== Demo: RTL smoke simulation (Icarus Verilog) =====
 sim-demo: $(DEMO_VERYL_DIR)/.stamp

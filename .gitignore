@@ -9,7 +9,8 @@ build/
 *.json
 *.log
 
-# Python cache
+# Python
+.venv/
 __pycache__/
 *.pyc
 

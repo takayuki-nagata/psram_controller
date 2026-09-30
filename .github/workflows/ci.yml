@@ -41,11 +41,24 @@ jobs:
         if: steps.cache-veryl.outputs.cache-hit != 'true'
         run: cargo install veryl --version 0.21.0 --locked
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.6"
+
+      - name: Python environment (cocotb, pytest)
+        run: |
+          uv python install 3.13
+          make setup
+
       - name: Veryl format and check
         run: make check
 
       - name: Lint (Verilator)
         run: make lint
+
+      - name: cocotb tests against the W955D8MBYA model (18 and 27 MHz)
+        run: make test-sim
 
       - name: Demo smoke simulation
         run: make sim-demo
