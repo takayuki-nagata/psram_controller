@@ -1,0 +1,32 @@
+# Copyright (c) 2026 Takayuki Nagata
+# SPDX-License-Identifier: MIT
+
+# make formal: prove (unbounded) and cover the psram_core properties at the two system
+# clock frequencies the IP is used at.
+
+[tasks]
+prove_1mhz prove 1mhz
+prove_18mhz prove 18mhz
+prove_27mhz prove 27mhz
+cover_1mhz cover 1mhz
+
+[options]
+prove: mode prove
+cover: mode cover
+cover: depth 300
+
+[engines]
+prove: abc pdr
+cover: smtbmc bitwuzla
+
+[script]
+read -formal psram_pkg.sv psram_core.sv psram_core_formal.sv
+1mhz: chparam -set CLK_HZ 1000000 psram_core_formal
+18mhz: chparam -set CLK_HZ 18000000 psram_core_formal
+27mhz: chparam -set CLK_HZ 27000000 psram_core_formal
+prep -top psram_core_formal
+
+[files]
+../build/veryl/rtl/psram_pkg.sv
+../build/veryl/rtl/psram_core.sv
+psram_core_formal.sv

@@ -57,6 +57,9 @@ jobs:
       - name: Lint (Verilator)
         run: make lint
 
+      - name: Formal proofs (SymbiYosys)
+        run: make formal
+
       - name: cocotb tests against the W955D8MBYA model (18 and 27 MHz)
         run: make test-sim
 

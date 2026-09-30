@@ -33,7 +33,7 @@ DEMO_SIM_DIR   := $(DEMO_BUILD_DIR)/sim
 DEMO_SYNTH_DIR := $(DEMO_BUILD_DIR)/synth
 CST_FILE       := $(DEMO_DIR)/tangnano9k.cst
 
-.PHONY: all setup fmt check lint eqy test test-sim veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
+.PHONY: all setup fmt check lint eqy formal test test-sim veryl veryl-demo sim-demo synth pnr bitstream sta prog-sram test-hw clean
 
 all: test bitstream
 
@@ -108,12 +108,23 @@ eqy: $(VERYL_OUT_DIR)/.stamp
 	$(PYTHON) scripts/run_eqy.py --base $(EQY_BASE) --top $(EQY_TOP) --veryl $(VERYL) \
 		$(if $(EQY_NOMATCH),--nomatch $(EQY_NOMATCH))
 
+# ===== Formal proofs of psram_core (SymbiYosys, formal/psram_core.sby) =====
+SBY ?= sby
+FORMAL_TASKS ?= prove_1mhz prove_18mhz prove_27mhz cover_1mhz
+formal: $(VERYL_OUT_DIR)/.stamp
+	@mkdir -p $(BUILD_DIR)/formal
+	@for t in $(FORMAL_TASKS); do \
+		(cd formal && $(SBY) -f -d ../$(BUILD_DIR)/formal/$$t psram_core.sby $$t > /dev/null) \
+			&& echo "=== formal $$t: PASS ===" \
+			|| { echo "=== formal $$t: FAIL (log: $(BUILD_DIR)/formal/$$t/logfile.txt) ==="; exit 1; }; \
+	done
+
 # ===== cocotb tests of the IP against the W955D8MBYA model (sim/) =====
 PYTEST_ARGS ?= -n auto
 test-sim: $(VERYL_OUT_DIR)/.stamp
 	$(PYTHON) -m pytest $(PYTEST_ARGS) sim/test_sim.py
 
-test: check lint test-sim sim-demo
+test: check lint formal test-sim sim-demo
 
 # ===== Demo: RTL smoke simulation (Icarus Verilog) =====
 sim-demo: $(DEMO_VERYL_DIR)/.stamp
