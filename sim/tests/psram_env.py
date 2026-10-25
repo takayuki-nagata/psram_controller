@@ -9,6 +9,8 @@ tests themselves stay the same when the interface changes.
 """
 
 import os
+import random
+from dataclasses import dataclass, field
 
 import cocotb
 from cocotb.clock import Clock
@@ -36,6 +38,26 @@ T_VCS_NS = 150_000
 
 def clk_mhz() -> float:
     return float(os.environ.get("PSRAM_CLK_MHZ", "27"))
+
+
+def max_burst_words() -> int:
+    """MAX_BURST_WORDS of the toplevel (tb default 16)."""
+    return int(os.environ.get("PSRAM_MAX_BURST_WORDS", "16"))
+
+
+def trwr_cycles(clk_hz: float) -> int:
+    """R in docs/integration.md: tRWR (36 ns) in system cycles, rounded up."""
+    return -(-36 * round(clk_hz) // 1_000_000_000)
+
+
+@dataclass
+class Timeline:
+    """Cycles (after acceptance in cycle 0) of one access, as seen by the host."""
+
+    beats: list[int] = field(default_factory=list)  # rsp_valid
+    last: int | None = None  # rsp_last
+    ready: int | None = None  # req_ready High again
+    wdata_next: list[int] = field(default_factory=list)
 
 
 def die_words(word: int) -> tuple[int, int]:
@@ -93,6 +115,7 @@ class PsramEnv:
         dut.req_addr.value = 0
         dut.req_wdata.value = 0
         dut.req_wstrb.value = 0
+        dut.req_len.value = 0
 
     async def wait_init(self, timeout_us: float = 2000.0):
         """Wait (at falling edges) until the controller finished the PSRAM power-up sequence."""
@@ -105,10 +128,13 @@ class PsramEnv:
 
     async def _protocol_monitor(self):
         """Host interface rules, checked on every cycle of every test:
-        at most one request in flight, exactly one response per accepted request,
-        req_ready Low before init_done, request payload stable until accepted."""
+        at most one request in flight, one response per word of an accepted read and one per
+        write, rsp_last with the last one, wdata_next only during a burst write, req_ready
+        Low before init_done, request payload stable until accepted, and the request
+        contract (bursts: memory only, length-aligned, writes with all byte enables)."""
         dut = self.dut
-        outstanding = 0
+        outstanding = 0  # responses still to come
+        burst_write = False
         held = None
         while True:
             # After the falling edge settled: the inputs the controller will sample at the next
@@ -116,13 +142,20 @@ class PsramEnv:
             await FallingEdge(dut.clk)
             await ReadOnly()
             if dut.rst_n.value == 0:
-                outstanding, held = 0, None
+                outstanding, burst_write, held = 0, False, None
                 continue
             # A response registered at the last rising edge
             if dut.rsp_valid.value == 1:
-                assert outstanding == 1, "rsp_valid without an accepted request"
+                assert outstanding >= 1, "rsp_valid without an accepted request"
                 outstanding -= 1
-                self.responses += 1
+                assert int(dut.rsp_last.value) == int(outstanding == 0), "rsp_last not with the last response"
+                if outstanding == 0:
+                    self.responses += 1
+                    burst_write = False
+            else:
+                assert dut.rsp_last.value == 0, "rsp_last without rsp_valid"
+            if dut.wdata_next.value == 1:
+                assert burst_write, "wdata_next outside a burst write"
             valid = dut.req_valid.value == 1
             ready = dut.req_ready.value == 1
             if ready:
@@ -132,27 +165,40 @@ class PsramEnv:
                 int(dut.req_addr.value),
                 int(dut.req_wdata.value),
                 int(dut.req_wstrb.value),
+                int(dut.req_len.value),
             )
             if held is not None:
                 assert valid and payload == held, "request withdrawn or changed before it was accepted"
             if valid and ready:  # accepted at the next rising edge
                 assert outstanding == 0, "controller accepted a second request while one is in flight"
-                outstanding += 1
+                we, addr, _, wstrb, length = payload
+                n = length + 1
+                if length:
+                    assert n <= max_burst_words(), f"burst of {n} words > MAX_BURST_WORDS"
+                    assert not addr >> 23 & 1, "burst to register space"
+                    assert addr % (4 * n) == 0, f"burst of {n} words at unaligned {addr:#08x}"
+                    assert not we or wstrb == 0xF, "burst write without all byte enables"
+                outstanding = 1 if we else n
+                burst_write = bool(we and length)
                 self.accepted += 1
                 held = None
             elif valid:
                 held = payload
 
     # ------------------------------------------------------------ host bus
-    async def request(self, we: bool, addr: int, wdata: int = 0, wstrb: int = 0xF, max_cycles: int = 500):
-        """Present a request and hold it until accepted. Call right after a falling edge;
-        returns right after the falling edge that follows the accepting rising edge."""
+    async def request(
+        self, we: bool, addr: int, wdata: int = 0, wstrb: int = 0xF, max_cycles: int = 500, length: int = 1
+    ):
+        """Present a request (length words) and hold it until accepted. Call right after a
+        falling edge; returns right after the falling edge that follows the accepting rising
+        edge, i.e. in cycle 1 when the request was accepted in cycle 0."""
         dut = self.dut
         dut.req_valid.value = 1
         dut.req_we.value = int(we)
         dut.req_addr.value = addr
         dut.req_wdata.value = wdata
         dut.req_wstrb.value = wstrb
+        dut.req_len.value = length - 1
         for _ in range(max_cycles):
             await ReadOnly()
             ready = dut.req_ready.value == 1
@@ -178,6 +224,65 @@ class PsramEnv:
         """One access; returns rdata (reads) or 0. Starts and ends right after a falling edge."""
         await self.request(we, addr, wdata, wstrb)
         return await self.response(we, addr)
+
+    async def burst(
+        self, we: bool, addr: int, words: list[int] | None = None, n: int = 1, max_cycles: int = 500
+    ) -> tuple[list[int], Timeline]:
+        """One burst access of n words (writes: len(words)) through the full contract:
+        write data word k is driven only in the cycle after wdata_next (random data in all
+        other cycles). Returns (read data, Timeline) once req_ready is High again, so that a
+        following request is back-to-back. Starts and ends right after a falling edge."""
+        dut = self.dut
+        if we:
+            n = len(words)
+        await self.request(we, addr, words[0] if we else 0, 0xF, length=n)
+        rng = random.Random(addr ^ n)
+        timeline = Timeline()
+        rdata: list[int] = []
+        next_word = 1
+        drive = False
+        for cycle in range(1, max_cycles):
+            # Outputs of this cycle (they only change at rising edges)
+            if dut.rsp_valid.value == 1:
+                timeline.beats.append(cycle)
+                if not we:
+                    value = dut.rsp_rdata.value
+                    if not value.is_resolvable:
+                        raise AssertionError(f"burst read of {addr:#08x} word {len(rdata)} returned {value} (X/Z)")
+                    rdata.append(value.to_unsigned())
+                if dut.rsp_last.value == 1:
+                    timeline.last = cycle
+            strobe = dut.wdata_next.value == 1
+            if strobe:
+                timeline.wdata_next.append(cycle)
+            if dut.req_ready.value == 1:
+                timeline.ready = cycle
+                dut.req_wdata.value = 0
+                break
+            # Input sampled at the rising edge that ends this cycle
+            if we and drive:
+                assert next_word < n, "wdata_next asked for more words than the burst has"
+                dut.req_wdata.value = words[next_word]
+                next_word += 1
+            else:
+                dut.req_wdata.value = rng.getrandbits(32)
+            drive = strobe
+            await FallingEdge(dut.clk)
+        else:
+            raise TimeoutError(f"burst {'write' if we else 'read'} of {addr:#08x} not finished")
+        if we:
+            assert next_word == n, f"burst write of {n} words took {next_word} words"
+            assert len(timeline.beats) == 1, f"burst write of {n} words: {len(timeline.beats)} responses, {timeline}"
+        else:
+            assert len(rdata) == n, f"burst read of {n} words returned {len(rdata)}"
+        assert timeline.last == timeline.beats[-1]
+        return rdata, timeline
+
+    async def read_burst(self, addr: int, n: int) -> list[int]:
+        return (await self.burst(False, addr, n=n))[0]
+
+    async def write_burst(self, addr: int, words: list[int]):
+        await self.burst(True, addr, words)
 
     async def write(self, addr: int, data: int, wstrb: int = 0xF):
         await self.access(True, addr, data, wstrb)

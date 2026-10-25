@@ -4,13 +4,14 @@
 // Tang Nano 9K PSRAM self-test
 // 1. ID0 register read with a 64-cycle real-time pin trace
 // 2. Four words written, then read back
-// 3. Full memory test over FULL_WORDS words (default: all 8 MB): write f(addr), then read
-//    f(addr) and write ~f(addr), then read ~f(addr) (every bit of every word both ways)
+// 3. Full memory test over FULL_WORDS words (default: all 8 MB), single words: write
+//    f(addr), then read f(addr) and write ~f(addr), then read ~f(addr) (every bit of every
+//    word both ways); then in 16-word bursts: read ~f(addr), write f(addr), read f(addr)
 // Results on the UART (115200 baud, 8N1) and the on-board LEDs.
 pub module psram_top #(
     param CLK_HZ     : u32 = 27_000_000, // clk frequency
     param DIAG_CYCLES: u32 = 64        ,
-    param FULL_WORDS : u32 = 1 << 21   , // 32-bit words covered by the full memory test
+    param FULL_WORDS : u32 = 1 << 21   , // 32-bit words covered by the full memory test (multiple of 16)
 ) (
     clk  : input clock          , // System clock (CLK_HZ)
     rst_n: input reset_async_low, // S1 Button (Hardware Reset, active-low)
@@ -37,14 +38,18 @@ pub module psram_top #(
     var psram_addr      : logic<24>;
     var psram_wdata     : logic<32>;
     var psram_wstrb     : logic<4> ;
+    var psram_len       : logic<4> ;
     var psram_rdata     : logic<32>;
     var psram_ready     : logic    ;
+    var psram_last      : logic    ;
+    var psram_wdata_next: logic    ;
     var psram_req_ready : logic    ;
     var psram_init_done : logic    ;
     var psram_dbg_sample: logic<32>;
 
     inst u_psram_ctrl: psram::psram_controller #(
-        CLK_HZ  ,
+        CLK_HZ             ,
+        MAX_BURST_WORDS: 16,
     ) (
         clk            : clk             ,
         rst_n          : rst_n           ,
@@ -54,8 +59,11 @@ pub module psram_top #(
         req_addr       : psram_addr      ,
         req_wdata      : psram_wdata     ,
         req_wstrb      : psram_wstrb     ,
+        req_len        : psram_len       ,
         rsp_rdata      : psram_rdata     ,
         rsp_valid      : psram_ready     ,
+        rsp_last       : psram_last      ,
+        wdata_next     : psram_wdata_next,
         init_done      : psram_init_done ,
         O_psram_ck     : O_psram_ck      ,
         O_psram_ck_n   : O_psram_ck_n    ,
@@ -145,13 +153,19 @@ pub module psram_top #(
     var err_addr        : logic    <24>;
 
     // Full memory test: pass 0 writes f(w), pass 1 reads f(w) and writes ~f(w), pass 2
-    // reads ~f(w); w is the 32-bit word index. f is unique per word and varies all 32 bits.
-    var full_pass : logic<2> ;
-    var full_word : logic<21>;
-    var full_write: logic    ; // pass 1: the write after the read of the same word
-    let full_f    : logic<32> = {full_word[10:0], full_word} ^ 32'hA5C3_96E1;
-    var cur_nibble: logic<4> ;
-    var hex_char  : logic<8> ;
+    // reads ~f(w), all single words; then 16-word bursts: pass 3 reads ~f(w), pass 4 writes
+    // f(w), pass 5 reads f(w). w is the 32-bit word index (during a burst: of the word
+    // being transferred). f is unique per word and varies all 32 bits.
+    var full_pass  : logic<3> ;
+    var full_word  : logic<21>;
+    var full_write : logic    ; // pass 1: the write after the read of the same word
+    let full_f     : logic<32> = {full_word[10:0], full_word} ^ 32'hA5C3_96E1;
+    let full_word_1: logic<21> = full_word + 21'd1;
+    let full_f_next: logic<32> = {full_word_1[10:0], full_word_1} ^ 32'hA5C3_96E1;
+    let full_burst : logic     = full_pass >= 3'd3;
+    let full_exp   : logic<32> = if full_pass == 3'd1 || full_pass == 3'd5 ? full_f : ~full_f;
+    var cur_nibble : logic<4> ;
+    var hex_char   : logic<8> ;
 
     // Diagnostic Print Indexing
     var diag_cyc_idx   : logic<6>; // 0 to 63
@@ -482,7 +496,7 @@ pub module psram_top #(
             6'b111110
         :
             (if test_state == TestState::FULL_REQ || test_state == TestState::FULL_WAIT ?
-                ~{full_pass, full_word[20:17]}
+                ~{full_pass, full_word[20:18]}
             :
                 ~{3'b000, test_idx}
             )
@@ -502,7 +516,7 @@ pub module psram_top #(
             err_expected    = 32'd0;
             err_got         = 32'd0;
             err_addr        = 24'd0;
-            full_pass       = 2'd0;
+            full_pass       = 3'd0;
             full_word       = 21'd0;
             full_write      = 1'b0;
             psram_req       = 1'b0;
@@ -510,6 +524,7 @@ pub module psram_top #(
             psram_addr      = 24'd0;
             psram_wdata     = 32'd0;
             psram_wstrb     = 4'b1111;
+            psram_len       = 4'd0;
             uart_wdata      = 8'd0;
             uart_we         = 1'b0;
             tracer_trigger  = 1'b0;
@@ -526,6 +541,12 @@ pub module psram_top #(
                 diag_psram_done = 1'b1;
             }
 
+            // Burst write: the next word in the cycle after wdata_next
+            if psram_wdata_next {
+                full_word   = full_word_1;
+                psram_wdata = full_f_next;
+            }
+
             case test_state {
                 TestState::WAIT_INIT: {
                     if psram_init_done {
@@ -537,6 +558,7 @@ pub module psram_top #(
                 TestState::DIAG_REQ: {
                     // ID0 Register Read: addr[23]=1 (Register Space), addr[22:0]=0
                     psram_req       = 1'b1;
+                    psram_len       = 4'd0;
                     psram_we        = 1'b0;
                     psram_addr      = 24'h800000;
                     tracer_trigger  = 1'b1;
@@ -610,6 +632,7 @@ pub module psram_top #(
 
                 TestState::WRITE_REQ: {
                     psram_req   = 1'b1;
+                    psram_len   = 4'd0;
                     psram_we    = 1'b1;
                     psram_addr  = cur_test_addr;
                     psram_wdata = cur_test_pattern;
@@ -631,6 +654,7 @@ pub module psram_top #(
 
                 TestState::READ_REQ: {
                     psram_req  = 1'b1;
+                    psram_len  = 4'd0;
                     psram_we   = 1'b0;
                     psram_addr = cur_test_addr;
                     test_state = TestState::READ_WAIT;
@@ -650,7 +674,7 @@ pub module psram_top #(
                         test_fail    = 1'b1;
                         test_state   = TestState::PRINT_START;
                     } else if test_idx == 3'd3 {
-                        full_pass  = 2'd0;
+                        full_pass  = 3'd0;
                         full_word  = 21'd0;
                         full_write = 1'b0;
                         test_state = TestState::FULL_REQ;
@@ -663,21 +687,24 @@ pub module psram_top #(
                 TestState::FULL_REQ: {
                     psram_req   = 1'b1;
                     psram_addr  = {1'b0, full_word, 2'b00};
-                    psram_we    = full_pass == 2'd0 || full_write;
-                    psram_wdata = if full_pass == 2'd0 ? full_f : ~full_f;
+                    psram_we    = full_pass == 3'd0 || full_pass == 3'd4 || full_write;
+                    psram_wdata = if full_pass == 3'd1 ? ~full_f : full_f;
                     psram_wstrb = 4'b1111;
+                    psram_len   = if full_burst ? 4'd15 : 4'd0;
                     test_state  = TestState::FULL_WAIT;
                 }
 
                 TestState::FULL_WAIT: {
                     if psram_ready {
-                        if !psram_we && psram_rdata != (if full_pass == 2'd1 ? full_f : ~full_f) {
-                            err_expected = if full_pass == 2'd1 ? full_f : ~full_f;
+                        if !psram_we && psram_rdata != full_exp {
+                            err_expected = full_exp;
                             err_got      = psram_rdata;
                             err_addr     = {1'b0, full_word, 2'b00};
                             test_fail    = 1'b1;
                             test_state   = TestState::PRINT_START;
-                        } else if full_pass == 2'd1 && !full_write {
+                        } else if !psram_last {
+                            full_word += 21'd1; // next word of a burst read
+                        } else if full_pass == 3'd1 && !full_write {
                             full_write = 1'b1;
                             test_state = TestState::FULL_REQ;
                         } else {
@@ -685,11 +712,11 @@ pub module psram_top #(
                             test_state = TestState::FULL_REQ;
                             if (full_word as u32) == FULL_WORDS - 1 {
                                 full_word = 21'd0;
-                                if full_pass == 2'd2 {
+                                if full_pass == 3'd5 {
                                     test_pass  = 1'b1;
                                     test_state = TestState::PRINT_START;
                                 } else {
-                                    full_pass += 2'd1;
+                                    full_pass += 3'd1;
                                 }
                             } else {
                                 full_word += 21'd1;

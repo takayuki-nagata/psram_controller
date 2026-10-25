@@ -23,9 +23,25 @@ from psram_env import (
     REG_ID1,
     T_VCS_NS,
     PsramEnv,
+    clk_mhz,
     die_words,
+    max_burst_words,
     reg_write_data,
+    trwr_cycles,
 )
+
+BURST_LENGTHS = [n for n in (1, 2, 4, 8, 16) if n <= max_burst_words()]
+ROW_BYTES = 2048  # one die row (512 words) = 2 KB of host address space
+
+
+def burst_addresses(rng: random.Random, n: int) -> list[int]:
+    """Aligned burst addresses: start, both sides of row boundaries, the 4 MB boundary,
+    the top of memory and a few random ones."""
+    size = 4 * n
+    addrs = [0, ROW_BYTES - size, ROW_BYTES, 5 * ROW_BYTES - size, MEM_BYTES // 2 - size, MEM_BYTES // 2]
+    addrs += [MEM_BYTES - size, MEM_BYTES - 2 * size]
+    addrs += [rng.randrange(0, MEM_BYTES, size) for _ in range(4)]
+    return addrs
 
 
 def strobe_merge(old: int, new: int, wstrb: int) -> int:
@@ -250,6 +266,86 @@ async def test_handshake(dut):
     assert env.accepted == 3 and env.responses == 3
 
 
+@cocotb.test()
+async def test_burst_read(dut):
+    """Burst reads of every length at aligned addresses around row boundaries and the top of
+    memory return the words stored in the model, in ascending order."""
+    env = PsramEnv(dut)
+    await env.start()
+    rng = random.Random(0xB0257)
+    for n in BURST_LENGTHS:
+        for addr in burst_addresses(rng, n):
+            # The burst plus one word on each side, so that an off-by-one shows up
+            words = [rng.getrandbits(32) for _ in range(n + 2)]
+            for i, w in enumerate(words):
+                env.backdoor_write((addr - 4 + 4 * i) % MEM_BYTES, w)
+            got = await env.read_burst(addr, n)
+            assert got == words[1:-1], f"burst read of {n} at {addr:#08x}: {[hex(w) for w in got]}"
+    await env.finish()
+
+
+@cocotb.test()
+async def test_burst_write(dut):
+    """Burst writes of every length store the words in order in the model, leave the
+    neighbouring words alone, and read back through single and burst reads."""
+    env = PsramEnv(dut)
+    await env.start()
+    rng = random.Random(0xB025)
+    for n in BURST_LENGTHS:
+        for addr in burst_addresses(rng, n):
+            before, after = (addr - 4) % MEM_BYTES, (addr + 4 * n) % MEM_BYTES
+            env.backdoor_write(before, 0xBEF0BEF0)
+            env.backdoor_write(after, 0xAF7EAF7E)
+            words = [rng.getrandbits(32) for _ in range(n)]
+            await env.write_burst(addr, words)
+            stored = [env.backdoor_word(addr + 4 * i) for i in range(n)]
+            assert stored == words, f"burst write of {n} at {addr:#08x}: model memory {stored}"
+            assert env.backdoor_word(before) == 0xBEF0BEF0, f"burst write at {addr:#08x} hit the word before"
+            assert env.backdoor_word(after) == 0xAF7EAF7E, f"burst write at {addr:#08x} hit the word after"
+            assert await env.read_burst(addr, n) == words
+            assert await env.read(addr + 4 * (n - 1)) == words[-1]
+    await env.finish()
+
+
+@cocotb.test()
+async def test_burst_random(dut):
+    """Random mix of burst reads/writes and single-word accesses with byte strobes against a
+    scoreboard, back to back or with random idle gaps."""
+    env = PsramEnv(dut)
+    await env.start()
+    rng = random.Random(0xB2)
+    scoreboard: dict[int, int] = {}
+    region = 64 * 1024  # small enough for bursts to overlap earlier ones
+    base = MEM_BYTES - region
+    for addr in range(base, MEM_BYTES, 4):
+        env.backdoor_write(addr, 0)
+        scoreboard[addr] = 0
+    for _ in range(400):
+        for _ in range(rng.choice((0, 0, 1, 3))):
+            await FallingEdge(dut.clk)
+        n = rng.choice(BURST_LENGTHS)
+        addr = base + rng.randrange(0, region, 4 * n)
+        op = rng.random()
+        if op < 0.35:
+            got = await env.read_burst(addr, n)
+            expected = [scoreboard[addr + 4 * i] for i in range(n)]
+            assert got == expected, f"burst read of {n} at {addr:#08x}"
+        elif op < 0.7:
+            words = [rng.getrandbits(32) for _ in range(n)]
+            await env.write_burst(addr, words)
+            for i, w in enumerate(words):
+                scoreboard[addr + 4 * i] = w
+        elif op < 0.85:
+            assert await env.read(addr) == scoreboard[addr], f"read {addr:#08x}"
+        else:
+            data, wstrb = rng.getrandbits(32), rng.randrange(1, 16)
+            await env.write(addr, data, wstrb)
+            scoreboard[addr] = strobe_merge(scoreboard[addr], data, wstrb)
+    for addr in range(base, MEM_BYTES, 4):
+        assert env.backdoor_word(addr) == scoreboard[addr], f"{addr:#08x}: model memory mismatch"
+    await env.finish()
+
+
 # Documentation of the die mapping used by the backdoor (kept executable)
 assert die_words(0x44332211) == (0x1133, 0x2244)
 
@@ -277,4 +373,21 @@ async def test_latency(dut):
     }
     dut._log.info(f"latency (cycles): {measured}")
     assert measured == {"memory write": 34, "memory read": 35, "register write": 12}, measured
+
+    # Single-word accesses through the burst driver: the same cycles, rsp_last with the
+    # response, req_ready again in the response cycle, no wdata_next
+    for we, cycle in ((False, 35), (True, 34)):
+        _, t = await env.burst(we, 0x6000, [0x01020304] if we else None, n=1)
+        assert t.beats == [cycle] and t.last == cycle and t.ready == cycle and t.wdata_next == [], t
+
+    # Bursts: the table in docs/integration.md (R = 1 at the clocks tested here)
+    assert trwr_cycles(clk_mhz() * 1e6) == 1
+    for n in BURST_LENGTHS[1:]:
+        _, t = await env.burst(True, 0x6000, list(range(n)))
+        assert t.wdata_next == [28 + 2 * k for k in range(1, n)], f"write {n}: {t}"
+        assert t.beats == [32 + 2 * n] and t.last == 32 + 2 * n and t.ready == 32 + 2 * n, f"write {n}: {t}"
+        data, t = await env.burst(False, 0x6000, n=n)
+        assert data == list(range(n)), f"read {n}: {data}"
+        assert t.beats == [32 + 2 * k for k in range(n)], f"read {n}: {t}"
+        assert t.last == 30 + 2 * n and t.ready == 33 + 2 * n and t.wdata_next == [], f"read {n}: {t}"
     await env.finish()

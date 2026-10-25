@@ -4,31 +4,47 @@
 // Top-level PSRAM controller module for Tang Nano 9K
 // Integrates HyperBus core FSM and physical IO buffers
 pub module psram_controller #(
-    param CLK_HZ: u32 = 27_000_000, // System clock frequency (Hz), 18-27 MHz verified
+    param CLK_HZ         : u32 = 27_000_000                                           , // System clock frequency (Hz), 18-27 MHz verified
+    param MAX_BURST_WORDS: u32 = 1                                                    , // Longest read burst (words): 1, 2, 4, 8 or 16
+    const LEN_W          : u32 = if MAX_BURST_WORDS >: 1 ? $clog2(MAX_BURST_WORDS) : 1,
 ) (
     clk  : input clock          ,
     rst_n: input reset_async_low,
 
-    // Host interface, valid/ready:
+    // Host interface, valid/ready (timing contract: docs/integration.md):
     // - A request is accepted in a cycle with req_valid && req_ready. Once req_valid is
-    //   raised it must stay High, with req_we/addr/wdata/wstrb unchanged, until accepted.
-    // - Every accepted request gets exactly one response: rsp_valid High for one cycle,
-    //   with rsp_rdata valid in that cycle for reads. One request is in flight at a time;
-    //   req_ready is High again in the cycle rsp_valid is.
+    //   raised it must stay High, with req_we/addr/wdata/wstrb/len unchanged, until accepted.
+    // - req_len: words - 1 of a memory burst, N = req_len + 1 <= MAX_BURST_WORDS, req_addr
+    //   aligned to 4N bytes. Register accesses use req_len = 0; burst writes (req_len > 0)
+    //   use req_wstrb = 4'b1111.
+    // - Reads get one response per word: rsp_valid High for one cycle with rsp_rdata, and
+    //   rsp_last High with the last word. Writes get one response (rsp_valid and rsp_last).
+    //   One request is in flight at a time.
+    // - Burst write data: word 0 is req_wdata at acceptance; word k (1..N-1) is req_wdata
+    //   in the cycle after wdata_next is High.
+    // - Cycles after acceptance (cycle 0), R = tRWR cycles = ceil(36 ns * CLK_HZ)
+    //   (1 up to 27.7 MHz); req_ready is High again in the last cycle listed:
+    //   req_len = 0: response at 34 + R (read), 33 + R (memory write), 11 + R (register
+    //                write)
+    //   read burst : word k at 32 + 2k; req_ready at 32 + 2N + R
+    //   write burst: wdata_next at 28 + 2k (word k in cycle 29 + 2k); response at 31 + 2N + R
     // - req_addr: byte address, 4-byte aligned. [23] = 0: memory (8 MB), 1: register
     //   space (ID0 0x800000, ID1 0x800004, CR0 0x800020, CR1 0x800024; a register write
     //   loads wdata[7:0]/[23:16] into die 0 and wdata[15:8]/[31:24] into die 1).
     // - req_wstrb: byte enables for memory writes (register writes ignore them).
     // - init_done: the PSRAM power-up sequence is over (req_ready is Low until then).
-    req_valid: input  logic    ,
-    req_ready: output logic    ,
-    req_we   : input  logic    , // 1: write, 0: read
-    req_addr : input  logic<24>,
-    req_wdata: input  logic<32>,
-    req_wstrb: input  logic<4> ,
-    rsp_valid: output logic    ,
-    rsp_rdata: output logic<32>,
-    init_done: output logic    ,
+    req_valid : input  logic       ,
+    req_ready : output logic       ,
+    req_we    : input  logic       , // 1: write, 0: read
+    req_addr  : input  logic<24>   ,
+    req_wdata : input  logic<32>   ,
+    req_wstrb : input  logic<4>    ,
+    req_len   : input  logic<LEN_W>, // burst words - 1
+    rsp_valid : output logic       ,
+    rsp_last  : output logic       , // last word of the response
+    rsp_rdata : output logic<32>   ,
+    wdata_next: output logic       , // burst write: drive the next word in the next cycle
+    init_done : output logic       ,
 
     // Internal PSRAM Physical Pins (connected via tangnano9k.cst)
     O_psram_ck     : output logic    <2> ,
@@ -59,7 +75,8 @@ pub module psram_controller #(
     };
 
     inst u_core: psram_core #(
-        CLK_HZ  ,
+        CLK_HZ           ,
+        MAX_BURST_WORDS  ,
     ) (
         clk                       ,
         rst_n                     ,
@@ -69,8 +86,11 @@ pub module psram_controller #(
         req_addr                  ,
         req_wdata                 ,
         req_wstrb                 ,
+        req_len                   ,
         rsp_valid                 ,
+        rsp_last                  ,
         rsp_rdata                 ,
+        wdata_next                ,
         init_done                 ,
         psram_ck_reg              ,
         ck_en                     ,

@@ -106,9 +106,12 @@ Following `CS#` assertion Low, a 48-bit (6-byte) Command-Address packet is trans
   - The controller drives `DQ[15:0]` on both clock edges, center aligned (data changes on the system clock rising edge, CK changes on the falling edge).
   - `RWDS[1:0]` acts as byte write masks (`0` = write byte, `1` = mask byte), driven Low as a preamble for one PSRAM clock before the data.
   - A 32-bit word is written across 2 DDR half-cycles (host `wdata[15:0]` on the CK rising edge, `wdata[31:16]` on the falling edge).
+  - A burst write of N words continues with word k on the edges 2k and 2k + 1 of the data phase; the host supplies word k in the cycle after `wdata_next`.
 - **Read Transaction**:
   - The PSRAM drives `DQ[15:0]` and `RWDS` edge aligned (valid tCKD <= 5.5 ns after each CK edge).
   - The controller samples each half word half a system clock after the CK edge that launched it, and keeps CS# Low for one more cycle so the last half word is still driven when sampled (datasheet Table 14 note 3).
+  - A burst read of N words keeps CK running for 2N edges; each host word is returned as soon as its second half is sampled, two cycles apart.
+- **Bursts**: memory accesses keep CA[45] = wrapped (as single words). With the default 32-byte wrap of CR0 (16 die words = 16 host words) and the address aligned to the burst length, a burst of up to 16 words never wraps, so linear and wrapped bursts are the same. CS# is Low for 30 + 2N cycles (read) or 29 + 2N (write), which must fit in tCSM (4 us): `psram_core` checks `(31 + 2 * MAX_BURST_WORDS) / CLK_HZ <= 4 us` at elaboration.
 
 ### 3.5 CS# Recovery Time
 - Upon completing a transaction, `CS#` is de-asserted High.
@@ -120,8 +123,9 @@ Following `CS#` assertion Low, a 48-bit (6-byte) Command-Address packet is trans
 
 ### 4.1 Host Bus Interface
 See the table in [README.md](../README.md#host-bus-interface-specification): a valid/ready request
-channel (`req_valid`, `req_ready`, `req_we`, `req_addr`, `req_wdata`, `req_wstrb`), a one-cycle
-response (`rsp_valid`, `rsp_rdata`) and `init_done`. `CLK_HZ` sets the system clock frequency;
+channel (`req_valid`, `req_ready`, `req_we`, `req_addr`, `req_wdata`, `req_wstrb`, `req_len`),
+one-cycle responses (`rsp_valid`, `rsp_last`, `rsp_rdata`), the burst write data strobe
+`wdata_next`, and `init_done`. `CLK_HZ` sets the system clock frequency;
 the reset pulse, power-up wait and CS# recovery are derived from the datasheet values in ns.
 
 ### 4.2 Finite State Machine (FSM)
@@ -130,9 +134,9 @@ the reset pulse, power-up wait and CS# recovery are derived from the datasheet v
 3. `IDLE`: `req_ready = 1`; accepts a request.
 4. `SEND_CA`: Drives `CS# = 0` and transmits the 48-bit CA packet over 6 system cycles.
 5. `WAIT_LATENCY`: Waits for the fixed latency (skipped for register writes).
-6. `WRITE_DATA`: Drives 32-bit `wdata` in two DDR half-cycles (Word 0, Word 1).
-7. `READ_DATA`: Samples 32-bit `rdata` in two DDR half-cycles (Word 0, Word 1).
-8. `RECOVERY`: De-asserts `CS# = 1`, waits `tRWR`, pulses `rsp_valid = 1`, and returns to `IDLE`.
+6. `WRITE_DATA`: Drives each 32-bit `wdata` word in two DDR half-cycles, N words in a burst.
+7. `READ_DATA`: Samples each 32-bit `rdata` word in two DDR half-cycles, N words in a burst; a burst responds with every word right away.
+8. `RECOVERY`: De-asserts `CS# = 1`, waits `tRWR`, pulses `rsp_valid = 1` (writes and single-word reads), and returns to `IDLE`.
 
 ---
 

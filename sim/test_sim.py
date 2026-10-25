@@ -30,7 +30,13 @@ TESTS = [
     "test_reset_during_access",
     "test_handshake",
     "test_latency",
+    "test_burst_read",
+    "test_burst_write",
+    "test_burst_random",
 ]
+
+# v0.1.0-compatible build (MAX_BURST_WORDS = 1, req_len tied to 0): the single-word tests
+COMPAT_TESTS = ["test_random", "test_back_to_back", "test_handshake", "test_latency"]
 
 
 def _case(name: str):
@@ -39,14 +45,24 @@ def _case(name: str):
     return name
 
 
-@pytest.mark.parametrize("testcase", [_case(t) for t in TESTS])
-@pytest.mark.parametrize("mhz", CLK_MHZ, ids=[f"{m}MHz" for m in CLK_MHZ])
-def test_controller(mhz, testcase):
+def _run(mhz: int, max_burst_words: int, testcase: str):
     run(
         "tb_psram_controller",
         "test_psram_controller",
         testcase=testcase,
         run_name=testcase,
-        parameters={"CLK_HZ": mhz * 1_000_000},
-        extra_env={"PSRAM_CLK_MHZ": str(mhz)},
+        parameters={"CLK_HZ": mhz * 1_000_000, "MAX_BURST_WORDS": max_burst_words},
+        extra_env={"PSRAM_CLK_MHZ": str(mhz), "PSRAM_MAX_BURST_WORDS": str(max_burst_words)},
     )
+
+
+@pytest.mark.parametrize("testcase", [_case(t) for t in TESTS])
+@pytest.mark.parametrize("mhz", CLK_MHZ, ids=[f"{m}MHz" for m in CLK_MHZ])
+def test_controller(mhz, testcase):
+    _run(mhz, 16, testcase)
+
+
+@pytest.mark.parametrize("testcase", [_case(t) for t in COMPAT_TESTS])
+@pytest.mark.parametrize("mhz", CLK_MHZ, ids=[f"{m}MHz" for m in CLK_MHZ])
+def test_controller_max1(mhz, testcase):
+    _run(mhz, 1, testcase)

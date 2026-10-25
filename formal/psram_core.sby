@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: MIT
 
 # make formal: prove (unbounded) and cover the psram_core properties at the two system
-# clock frequencies the IP is used at.
+# clock frequencies the IP is used at, with and without bursts (MAX_BURST_WORDS 16 / 1).
+# 1 MHz keeps the initialization short for cover; the properties are in cycles, so these
+# tasks skip psram_core's elaboration check of the tCSM limit on CLK_HZ.
 
 [tasks]
 prove_1mhz prove 1mhz
 prove_18mhz prove 18mhz
+prove_18mhz_max1 prove 18mhz max1
 prove_27mhz prove 27mhz
+prove_27mhz_max1 prove 27mhz max1
 cover_1mhz cover 1mhz
 
 [options]
@@ -20,10 +24,13 @@ prove: abc pdr
 cover: smtbmc bitwuzla
 
 [script]
-read -formal psram_pkg.sv psram_core.sv psram_core_formal.sv
+1mhz: read -formal -DPSRAM_SKIP_TCSM_CHECK psram_pkg.sv psram_core.sv psram_core_formal.sv
+18mhz: read -formal psram_pkg.sv psram_core.sv psram_core_formal.sv
+27mhz: read -formal psram_pkg.sv psram_core.sv psram_core_formal.sv
 1mhz: chparam -set CLK_HZ 1000000 psram_core_formal
 18mhz: chparam -set CLK_HZ 18000000 psram_core_formal
 27mhz: chparam -set CLK_HZ 27000000 psram_core_formal
+max1: chparam -set MAX_BURST_WORDS 1 psram_core_formal
 prep -top psram_core_formal
 
 [files]

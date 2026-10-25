@@ -112,7 +112,7 @@ eqy: $(VERYL_OUT_DIR)/.stamp
 
 # ===== Formal proofs of psram_core (SymbiYosys, formal/psram_core.sby) =====
 SBY ?= sby
-FORMAL_TASKS ?= prove_1mhz prove_18mhz prove_27mhz cover_1mhz
+FORMAL_TASKS ?= prove_1mhz prove_18mhz prove_18mhz_max1 prove_27mhz prove_27mhz_max1 cover_1mhz
 formal: $(VERYL_OUT_DIR)/.stamp
 	@mkdir -p $(BUILD_DIR)/formal
 	@for t in $(FORMAL_TASKS); do \

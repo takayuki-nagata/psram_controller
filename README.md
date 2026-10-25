@@ -18,8 +18,8 @@ and Veryl dependency; see [docs/integration.md](docs/integration.md).
 
 ## Key Highlights
 
-- **16-bit DDR Data Bus**: Operates the two internal 32Mb x8 dies in lockstep for 16-bit wide DDR data transfers; one 32-bit word per access (one CK edge per system clock cycle; `CLK_HZ` parameter, tested at 18 and 27 MHz).
-- **valid/ready Host Interface**: One request in flight, exactly one response per request, back-to-back capable; 35 cycles per read, 34 per write.
+- **16-bit DDR Data Bus**: Operates the two internal 32Mb x8 dies in lockstep for 16-bit wide DDR data transfers; one 32-bit word per access, or bursts of up to 16 words at one word per 2 cycles (one CK edge per system clock cycle; `CLK_HZ` parameter, tested at 18 and 27 MHz).
+- **valid/ready Host Interface**: One request in flight, back-to-back capable, fixed cycle-exact timing; 35 cycles per read, 34 per write, 30 + 2N for the N words of a burst read and 32 + 2N for a burst write.
 - **Center-Aligned Clocking**: PSRAM CK is registered on `negedge clk`, so that every CK edge is half a system clock after the data changes, giving generous setup and hold margins without complex PLLs or DLLs.
 - **Fixed Latency Mode**: Operates at 2x Fixed Latency (12 PSRAM clock cycles, counted from the third CA clock), supporting deterministic read and write transactions; register writes with zero latency.
 - **Clean-Room Specification**: Developed strictly from official vendor datasheets (Winbond & Gowin) without proprietary IP dependencies.
@@ -207,9 +207,10 @@ C20: 6 03 0 0 0 00 5F 5F
 
 ## Host Bus Interface Specification
 
-`psram_controller` has a valid/ready request channel and a one-cycle response. Parameter
+`psram_controller` has a valid/ready request channel and one-cycle responses. Parameter
 `CLK_HZ` (default 27 MHz) is the system clock frequency; the PSRAM clock is `CLK_HZ / 2`.
-The tests run at 18 MHz (VUX9K) and 27 MHz (this board).
+The tests run at 18 MHz (VUX9K) and 27 MHz (this board). Parameter `MAX_BURST_WORDS`
+(1, 2, 4, 8 or 16; default 1) is the longest memory burst.
 
 | Port | Direction | Width | Description |
 |---|---|---|---|
@@ -220,16 +221,23 @@ The tests run at 18 MHz (VUX9K) and 27 MHz (this board).
 | `req_we` | Input | 1 | `1`: write, `0`: read |
 | `req_addr` | Input | 24 | Byte address, 4-byte aligned (bit 23: `0` = memory, `1` = register space) |
 | `req_wdata` | Input | 32 | Write data |
-| `req_wstrb` | Input | 4 | Byte enables for memory writes |
-| `rsp_valid` | Output | 1 | One-cycle response, exactly one per accepted request |
+| `req_wstrb` | Input | 4 | Byte enables for memory writes (all set for burst writes) |
+| `req_len` | Input | max(1, clog2(`MAX_BURST_WORDS`)) | Burst length - 1 (memory only, address aligned to the length; 0 for single words) |
+| `rsp_valid` | Output | 1 | One-cycle response: one per word for reads, one per write |
+| `rsp_last` | Output | 1 | With the last response of a request |
 | `rsp_rdata` | Output | 32 | Read data, valid with `rsp_valid` |
+| `wdata_next` | Output | 1 | Burst write: drive the next word on `req_wdata` in the next cycle |
 | `init_done` | Output | 1 | PSRAM power-up sequence finished (`req_ready` is Low until then) |
 | `dbg_sample` | Output | 32 | FSM/pin state for an on-chip tracer; leave unconnected if unused |
 
-One request is in flight at a time; `req_ready` is High again in the cycle of `rsp_valid`,
-so the next request can be accepted back-to-back. A request accepted in cycle 0 gets
-`rsp_valid` in cycle 35 (read), 34 (memory write) or 12 (register write)
-(checked by `test_latency` at 18 and 27 MHz). Register space: ID0 `0x800000`,
+One request is in flight at a time. A single-word request accepted in cycle 0 gets
+`rsp_valid` in cycle 35 (read), 34 (memory write) or 12 (register write), and `req_ready`
+is High again in that cycle, so the next request can be accepted back-to-back. A burst
+read of N words delivers word k in cycle 32 + 2k and is ready again in cycle 33 + 2N; a
+burst write takes word k (k >= 1) in cycle 29 + 2k and responds and is ready in cycle
+32 + 2N (at up to 27.7 MHz; the full table, with the one `CLK_HZ`-dependent term, is in
+[docs/integration.md](docs/integration.md#timing), checked by `test_latency` at 18 and
+27 MHz and proven by `make formal`). Register space: ID0 `0x800000`,
 ID1 `0x800004`, CR0 `0x800020`, CR1 `0x800024` (a register write loads `wdata[7:0]`/`[23:16]`
 into die 0 and `wdata[15:8]`/`[31:24]` into die 1).
 

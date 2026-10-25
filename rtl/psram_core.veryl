@@ -2,28 +2,34 @@
 // SPDX-License-Identifier: MIT
 
 // HyperBus protocol FSM for the Tang Nano 9K internal PSRAM: two Winbond W955D8MBYA x8
-// dies in lockstep, one 32-bit host word per access (one 16-bit word in each die).
+// dies in lockstep, one 32-bit host word per beat (one 16-bit word in each die). Memory
+// reads and writes are bursts of 1..MAX_BURST_WORDS words; register accesses are single words.
 // Clean-room implementation based on the vendor datasheets.
 //
 // The system clock runs at twice the PSRAM clock: every system cycle of a transaction is
 // one CK edge. psram_core changes CS#/DQ/RWDS on the rising edge of clk, psram_phy moves
 // CK on the falling edge, so data is center aligned to CK.
 pub module psram_core #(
-    param CLK_HZ: u32 = 27_000_000, // System clock frequency (Hz); the PSRAM clock is CLK_HZ / 2
+    param CLK_HZ         : u32 = 27_000_000                                           , // System clock frequency (Hz); the PSRAM clock is CLK_HZ / 2
+    param MAX_BURST_WORDS: u32 = 1                                                    , // Longest read burst (words): 1, 2, 4, 8 or 16
+    const LEN_W          : u32 = if MAX_BURST_WORDS >: 1 ? $clog2(MAX_BURST_WORDS) : 1,
 ) (
     clk  : input clock          , // System clock
     rst_n: input reset_async_low,
 
     // Host interface (see psram_controller)
-    req_valid: input  logic    ,
-    req_ready: output logic    ,
-    req_we   : input  logic    ,
-    req_addr : input  logic<24>,
-    req_wdata: input  logic<32>,
-    req_wstrb: input  logic<4> ,
-    rsp_valid: output logic    ,
-    rsp_rdata: output logic<32>,
-    init_done: output logic    ,
+    req_valid : input  logic       ,
+    req_ready : output logic       ,
+    req_we    : input  logic       ,
+    req_addr  : input  logic<24>   ,
+    req_wdata : input  logic<32>   ,
+    req_wstrb : input  logic<4>    ,
+    req_len   : input  logic<LEN_W>,
+    rsp_valid : output logic       ,
+    rsp_last  : output logic       ,
+    rsp_rdata : output logic<32>   ,
+    wdata_next: output logic       ,
+    init_done : output logic       ,
 
     // Physical interface to psram_phy
     psram_ck_reg: output logic    ,
@@ -68,26 +74,49 @@ pub module psram_core #(
     // Read: enter READ_DATA one cycle before the rising edge of clock 15, which launches word 0
     const READ_DATA_T: u32 = LATENCY_CYCLES - 4;
 
+    // tCSM: CS# is Low for 30 + 2N cycles in an N-word read burst, the longest transaction
+    // (29 + 2N in a write burst).
+    // With one cycle of margin, (31 + 2 * MAX_BURST_WORDS) / CLK_HZ must not exceed 4 us.
+    const CS_LOW_MAX_CYCLES: u64 = 31 + 2 * (MAX_BURST_WORDS as u64);
+
+    embed (inline) sv{{{
+    // Elaboration-time checks of the parameters
+    if (MAX_BURST_WORDS != 1 && MAX_BURST_WORDS != 2 && MAX_BURST_WORDS != 4 &&
+        MAX_BURST_WORDS != 8 && MAX_BURST_WORDS != 16) begin : g_max_burst_words_invalid
+        $error("psram_core: MAX_BURST_WORDS must be 1, 2, 4, 8 or 16");
+    end
+    // The formal proofs at 1 MHz (formal/psram_core.sby) skip this check: their properties
+    // are in cycles, and the slow clock keeps the initialization short
+    `ifndef PSRAM_SKIP_TCSM_CHECK
+    if (CS_LOW_MAX_CYCLES * 64'd1_000_000_000 > 64'd4_000 * CLK_HZ) begin : g_tcsm_violated
+        $error("psram_core: CLK_HZ too low for MAX_BURST_WORDS, CS# Low exceeds tCSM (4 us)");
+    end
+    `endif
+    }}}
+
     // ---------------------------------------------------------------- state
-    var state      : State    ;
-    var timer      : logic<16>;
-    var ca_shift   : logic<48>; // Command-Address of the current transaction
-    var r_we       : logic    ;
-    var r_wdata    : logic<32>;
-    var r_wstrb    : logic<4> ;
-    var r_rdata    : logic<32>;
-    var r_rsp_valid: logic    ;
-    var r_cs_n     : logic    ;
-    var r_reset_n  : logic    ;
-    var r_ck       : logic    ;
-    var r_ck_en    : logic    ;
-    var r_dq_oe    : logic    ;
-    var r_dq_out   : logic<16>;
-    var r_rwds_oe  : logic    ;
-    var r_rwds_out : logic<2> ;
+    var state      : State       ;
+    var timer      : logic<16>   ;
+    var ca_shift   : logic<48>   ; // Command-Address of the current transaction
+    var r_we       : logic       ;
+    var r_wdata    : logic<32>   ;
+    var r_wstrb    : logic<4>    ;
+    var r_len      : logic<LEN_W>; // words - 1 of the current read burst
+    var r_rdata    : logic<32>   ;
+    var r_rsp_valid: logic       ;
+    var r_rsp_last : logic       ;
+    var r_cs_n     : logic       ;
+    var r_reset_n  : logic       ;
+    var r_ck       : logic       ;
+    var r_ck_en    : logic       ;
+    var r_dq_oe    : logic       ;
+    var r_dq_out   : logic<16>   ;
+    var r_rwds_oe  : logic       ;
+    var r_rwds_out : logic<2>    ;
 
     assign req_ready    = state == State::IDLE;
     assign rsp_valid    = r_rsp_valid;
+    assign rsp_last     = r_rsp_last;
     assign rsp_rdata    = r_rdata;
     assign init_done    = state != State::RESET_ASSERT && state != State::RESET_WAIT;
     assign psram_ck_reg = r_ck;
@@ -132,6 +161,19 @@ pub module psram_core #(
         word_addr[2:0], // CA[2:0]: lower column address A2..A0
     };
 
+    // READ_DATA/WRITE_DATA timer values (at most 2N + 1 <= 33, so timer[5:1] is the word
+    // pair index): a read samples its last word at 2N and raises CS# at 2N + 1; a write
+    // drives its last data at 2N - 1 (register writes: 1)
+    let len5      : logic<5> = {1'b0 repeat 5 - LEN_W, r_len};
+    let pair      : logic<5> = timer[5:1];
+    let read_last : logic    = !timer[0] && pair == len5 + 5'd1;
+    let read_end  : logic    = timer[0] && pair == len5 + 5'd1;
+    let write_last: logic    = timer[0] && pair == len5;
+
+    // Host write data word k (1..N-1) is loaded from req_wdata at the end of cycle 29 + 2k
+    // (WRITE_DATA timer 2k - 1); wdata_next is High in the cycle before (timer 2k - 2)
+    assign wdata_next = state == State::WRITE_DATA && !timer[0] && pair <: len5;
+
     // ---------------------------------------------------------------- FSM
     always_ff (clk, rst_n) {
         if_reset {
@@ -141,8 +183,10 @@ pub module psram_core #(
             r_we        = 1'b0;
             r_wdata     = 32'd0;
             r_wstrb     = 4'd0;
+            r_len       = '0;
             r_rdata     = 32'd0;
             r_rsp_valid = 1'b0;
+            r_rsp_last  = 1'b0;
             r_cs_n      = 1'b1;
             r_reset_n   = 1'b0;
             r_ck        = 1'b0;
@@ -153,6 +197,7 @@ pub module psram_core #(
             r_rwds_out  = 2'b00;
         } else {
             r_rsp_valid = 1'b0;
+            r_rsp_last  = 1'b0;
 
             case state {
                 // RESET# Low for tRP
@@ -193,9 +238,11 @@ pub module psram_core #(
                     timer     = 16'd0;
 
                     if req_valid {
-                        r_we     = req_we;
-                        r_wdata  = req_wdata;
-                        r_wstrb  = req_wstrb;
+                        r_we    = req_we;
+                        r_wdata = req_wdata;
+                        r_wstrb = req_wstrb;
+                        // Bursts are memory accesses only (and absent with MAX_BURST_WORDS = 1)
+                        r_len    = if MAX_BURST_WORDS == 1 || is_reg ? '0 : req_len;
                         ca_shift = ca_packet;
                         r_cs_n   = 1'b0;
                         r_ck_en  = 1'b1;
@@ -256,13 +303,20 @@ pub module psram_core #(
                     }
                 }
 
-                // timer 0: word 0 on the CK rising edge; timer 1: word 1 on the falling edge
+                // timer 2k: host word k [15:0] on DQ (CK rising edge); load [31:16]
+                // timer 2k + 1: host word k [31:16] on DQ (CK falling edge); load word k + 1
+                //               from req_wdata (wdata_next was High in the cycle before), or
+                //               end the burst after the last word (timer 2N - 1)
                 State::WRITE_DATA: {
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
-                    if timer == 16'd0 {
+                    if !timer[0] {
                         r_dq_out   = r_wdata[31:16];
                         r_rwds_out = {~r_wstrb[3], ~r_wstrb[2]};
+                    } else if !write_last {
+                        r_wdata    = req_wdata;
+                        r_dq_out   = req_wdata[15:0];
+                        r_rwds_out = {~r_wstrb[1], ~r_wstrb[0]};
                     } else {
                         r_dq_oe   = 1'b0;
                         r_rwds_oe = 1'b0;
@@ -274,36 +328,46 @@ pub module psram_core #(
                     }
                 }
 
-                // timer 0: CK rises (clock 15), the PSRAM launches word 0
-                // timer 1: sample word 0 (half a system cycle after the CK edge); CK falls
-                // timer 2: sample word 1; stop CK
-                // timer 3: raise CS#; it stayed Low one more cycle so that the last word is
-                //          still driven when sampled (datasheet Table 14 note 3)
+                // timer 0: CK rises (clock 15), the PSRAM launches the first die word
+                // timer 2k + 1: sample die word 2k (half a system cycle after the CK edge)
+                // timer 2k + 2: sample die word 2k + 1, completing host word k; a burst
+                //               (r_len != 0) responds with it right away; stop CK after
+                //               the last one (timer 2N)
+                // timer 2N + 1: raise CS#; it stayed Low one more cycle so that the last
+                //               word is still driven when sampled (datasheet Table 14 note 3)
                 State::READ_DATA: {
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
-                    if timer == 16'd1 {
-                        r_rdata[15:0] = dq_in;
-                    } else if timer == 16'd2 {
-                        r_rdata[31:16] = dq_in;
-                        r_ck_en        = 1'b0;
-                        r_ck           = 1'b0;
-                    } else if timer >= 16'd3 {
+                    if read_end {
                         r_cs_n  = 1'b1;
                         r_ck_en = 1'b0;
                         r_ck    = 1'b0;
                         timer   = 16'd0;
                         state   = State::RECOVERY;
+                    } else if timer[0] {
+                        r_rdata[15:0] = dq_in;
+                    } else if timer != 16'd0 {
+                        r_rdata[31:16] = dq_in;
+                        if r_len != '0 {
+                            r_rsp_valid = 1'b1;
+                            r_rsp_last  = read_last;
+                        }
+                        if read_last {
+                            r_ck_en = 1'b0;
+                            r_ck    = 1'b0;
+                        }
                     }
                 }
 
-                // CS# High for tRWR, then respond
+                // CS# High for tRWR, then respond (writes and single-word reads; burst reads
+                // responded in READ_DATA)
                 State::RECOVERY: {
                     r_cs_n  = 1'b1;
                     r_ck_en = 1'b0;
                     r_ck    = 1'b0;
                     if (timer as u64) >= CS_RECOVERY_CYCLES {
-                        r_rsp_valid = 1'b1;
+                        r_rsp_valid = r_we || r_len == '0;
+                        r_rsp_last  = r_we || r_len == '0;
                         timer       = 16'd0;
                         state       = State::IDLE;
                     } else {
