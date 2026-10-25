@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, ReadOnly, Timer
+from cocotb.types import LogicArray
 
 # ---------------------------------------------------------------- address map
 # Memory space: byte address, 4-byte aligned. Each 32-bit host word is one 16-bit word
@@ -71,6 +72,13 @@ def die_words(word: int) -> tuple[int, int]:
 def host_word(d0: int, d1: int) -> int:
     """(die 0 word, die 1 word) -> host 32-bit word; inverse of die_words()."""
     return ((d0 >> 8) & 0xFF) | (((d1 >> 8) & 0xFF) << 8) | ((d0 & 0xFF) << 16) | ((d1 & 0xFF) << 24)
+
+
+def masked_x(word: int, wstrb: int) -> LogicArray:
+    """word with the bytes that wstrb disables replaced by X (as a host's never-written
+    cache bytes are in simulation)."""
+    bits = "".join(f"{word >> 8 * i & 0xFF:08b}" if wstrb >> i & 1 else "X" * 8 for i in reversed(range(4)))
+    return LogicArray(bits)
 
 
 def reg_write_data(value: int) -> int:
@@ -163,7 +171,7 @@ class PsramEnv:
             payload = (
                 int(dut.req_we.value),
                 int(dut.req_addr.value),
-                int(dut.req_wdata.value),
+                str(dut.req_wdata.value),
                 int(dut.req_wstrb.value),
                 int(dut.req_len.value),
             )
@@ -171,13 +179,12 @@ class PsramEnv:
                 assert valid and payload == held, "request withdrawn or changed before it was accepted"
             if valid and ready:  # accepted at the next rising edge
                 assert outstanding == 0, "controller accepted a second request while one is in flight"
-                we, addr, _, wstrb, length = payload
+                we, addr, _, _, length = payload
                 n = length + 1
                 if length:
                     assert n <= max_burst_words(), f"burst of {n} words > MAX_BURST_WORDS"
                     assert not addr >> 23 & 1, "burst to register space"
                     assert addr % (4 * n) == 0, f"burst of {n} words at unaligned {addr:#08x}"
-                    assert not we or wstrb == 0xF, "burst write without all byte enables"
                 outstanding = 1 if we else n
                 burst_write = bool(we and length)
                 self.accepted += 1
@@ -187,7 +194,13 @@ class PsramEnv:
 
     # ------------------------------------------------------------ host bus
     async def request(
-        self, we: bool, addr: int, wdata: int = 0, wstrb: int = 0xF, max_cycles: int = 500, length: int = 1
+        self,
+        we: bool,
+        addr: int,
+        wdata: int | LogicArray = 0,
+        wstrb: int = 0xF,
+        max_cycles: int = 500,
+        length: int = 1,
     ):
         """Present a request (length words) and hold it until accepted. Call right after a
         falling edge; returns right after the falling edge that follows the accepting rising
@@ -226,16 +239,27 @@ class PsramEnv:
         return await self.response(we, addr)
 
     async def burst(
-        self, we: bool, addr: int, words: list[int] | None = None, n: int = 1, max_cycles: int = 500
+        self,
+        we: bool,
+        addr: int,
+        words: list[int] | None = None,
+        n: int = 1,
+        wstrbs: list[int] | None = None,
+        max_cycles: int = 500,
     ) -> tuple[list[int], Timeline]:
         """One burst access of n words (writes: len(words)) through the full contract:
-        write data word k is driven only in the cycle after wdata_next (random data in all
-        other cycles). Returns (read data, Timeline) once req_ready is High again, so that a
-        following request is back-to-back. Starts and ends right after a falling edge."""
+        write data word k and its byte enables wstrbs[k] (default all) are driven only in
+        the cycle after wdata_next (random data and strobes in all other cycles), with the
+        disabled bytes X. Returns (read data, Timeline) once req_ready is High again, so that
+        a following request is back-to-back. Starts and ends right after a falling edge."""
         dut = self.dut
         if we:
             n = len(words)
-        await self.request(we, addr, words[0] if we else 0, 0xF, length=n)
+            wstrbs = wstrbs or [0xF] * n
+            word = [masked_x(w, m) for w, m in zip(words, wstrbs, strict=True)]
+            await self.request(True, addr, word[0], wstrbs[0], length=n)
+        else:
+            await self.request(False, addr, length=n)
         rng = random.Random(addr ^ n)
         timeline = Timeline()
         rdata: list[int] = []
@@ -258,14 +282,17 @@ class PsramEnv:
             if dut.req_ready.value == 1:
                 timeline.ready = cycle
                 dut.req_wdata.value = 0
+                dut.req_wstrb.value = 0
                 break
             # Input sampled at the rising edge that ends this cycle
             if we and drive:
                 assert next_word < n, "wdata_next asked for more words than the burst has"
-                dut.req_wdata.value = words[next_word]
+                dut.req_wdata.value = word[next_word]
+                dut.req_wstrb.value = wstrbs[next_word]
                 next_word += 1
             else:
                 dut.req_wdata.value = rng.getrandbits(32)
+                dut.req_wstrb.value = rng.getrandbits(4)
             drive = strobe
             await FallingEdge(dut.clk)
         else:
@@ -281,8 +308,8 @@ class PsramEnv:
     async def read_burst(self, addr: int, n: int) -> list[int]:
         return (await self.burst(False, addr, n=n))[0]
 
-    async def write_burst(self, addr: int, words: list[int]):
-        await self.burst(True, addr, words)
+    async def write_burst(self, addr: int, words: list[int], wstrbs: list[int] | None = None):
+        await self.burst(True, addr, words, wstrbs=wstrbs)
 
     async def write(self, addr: int, data: int, wstrb: int = 0xF):
         await self.access(True, addr, data, wstrb)

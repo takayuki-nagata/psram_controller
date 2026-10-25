@@ -9,6 +9,8 @@
 //     write, rsp_last with the last one; req_ready only after init_done
 //   - timing contract (docs/integration.md): the cycle of every response, of req_ready,
 //     and of every wdata_next, for every length; R = tRWR cycles
+//   - write data: DQ and the RWDS masks carry each word's req_wdata/req_wstrb (word 0 at
+//     acceptance, word k in cycle 29 + 2k) on its two edges
 //   - CS#: both dies together, High during initialization, Low for 30 + 2N cycles at most
 //     (read; 29 + 2N write), CK only runs while CS# is Low
 //   - bus direction: reads never drive RWDS and drive DQ only for the CA; register writes
@@ -88,6 +90,8 @@ module psram_core_formal #(
     reg [5:0] f_n;        // its length (words)
     reg [5:0] f_left;     // responses still to come
     reg [7:0] f_wait;     // cycles since acceptance - 1 (0 in cycle 1)
+    reg [31:0] f_wdata0;  // word 0 of a write
+    reg [3:0]  f_wstrb0;
     reg [7:0] f_cs_low;   // cycles CS# has been Low
     reg [15:0] f_rst_low; // cycles RESET# has been Low
     always @(posedge clk or negedge rst_n) begin
@@ -99,6 +103,8 @@ module psram_core_formal #(
             f_n       <= 6'd0;
             f_left    <= 6'd0;
             f_wait    <= 8'd0;
+            f_wdata0  <= 32'd0;
+            f_wstrb0  <= 4'd0;
             f_cs_low  <= 8'd0;
             f_rst_low <= 16'd0;
         end else begin
@@ -114,6 +120,8 @@ module psram_core_formal #(
                 f_reg  <= req_addr[23];
                 f_n    <= req_n;
                 f_left <= req_we ? 6'd1 : req_n;
+                f_wdata0 <= req_wdata;
+                f_wstrb0 <= req_wstrb;
                 f_wait <= 8'd0;
             end else if (f_busy && f_wait != 8'hFF) begin
                 f_wait <= f_wait + 8'd1;
@@ -166,6 +174,24 @@ module psram_core_formal #(
 
             // RESET#
             if (init_done) assert (reset_n_out == 2'b11);
+        end
+    end
+
+    // Memory write data phase: word k on DQ in cycles 30 + 2k ([15:0], f_wait 29 + 2k) and
+    // 31 + 2k ([31:16]), k = 0..N-1; word k >= 1 is req_wdata/req_wstrb of cycle 29 + 2k
+    wire f_wdata_phase = f_out && f_we && !f_reg && f_wait >= 8'd29 && f_wait <= 8'd28 + 8'd2 * 8'(f_n);
+    always @(posedge clk) begin
+        if (f_past_valid && rst_n && $past(rst_n) && f_wdata_phase) begin
+            assert (dq_oe && rwds_oe);
+            if (f_wait == 8'd29) begin
+                assert (dq_out == f_wdata0[15:0] && rwds_out == ~f_wstrb0[1:0]);
+            end else if (f_wait == 8'd30) begin
+                assert (dq_out == f_wdata0[31:16] && rwds_out == ~f_wstrb0[3:2]);
+            end else if (f_wait[0]) begin
+                assert (dq_out == $past(req_wdata[15:0]) && rwds_out == ~$past(req_wstrb[1:0]));
+            end else begin
+                assert (dq_out == $past(req_wdata[31:16], 2) && rwds_out == ~$past(req_wstrb[3:2], 2));
+            end
         end
     end
 

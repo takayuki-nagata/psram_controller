@@ -32,6 +32,7 @@ TESTS = [
     "test_latency",
     "test_burst_read",
     "test_burst_write",
+    "test_burst_strobes",
     "test_burst_random",
 ]
 

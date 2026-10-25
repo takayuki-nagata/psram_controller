@@ -308,6 +308,36 @@ async def test_burst_write(dut):
 
 
 @cocotb.test()
+async def test_burst_strobes(dut):
+    """Burst writes with per-word byte enables (masked bytes driven as X): mixed strobes,
+    fully masked words (first, last, in the middle, all of them); every byte checked in the
+    model memory and read back."""
+    env = PsramEnv(dut)
+    await env.start()
+    rng = random.Random(0x5770)
+    for n in BURST_LENGTHS[1:]:
+        patterns = [
+            [rng.randrange(16) for _ in range(n)],
+            [0x0] + [0xF] * (n - 2) + [0x0],
+            [0xF] * (n // 2) + [0x0] + [0xF] * (n - n // 2 - 1),
+            [1 << (k % 4) for k in range(n)],
+            [0x0] * n,
+        ]
+        for i, wstrbs in enumerate(patterns):
+            addr = (i + 1) * ROW_BYTES - 4 * n * (1 + i % 2)
+            old = [rng.getrandbits(32) for _ in range(n)]
+            for k, w in enumerate(old):
+                env.backdoor_write(addr + 4 * k, w)
+            new = [rng.getrandbits(32) for _ in range(n)]
+            await env.write_burst(addr, new, wstrbs)
+            expected = [strobe_merge(o, w, m) for o, w, m in zip(old, new, wstrbs, strict=True)]
+            stored = [env.backdoor_word(addr + 4 * k) for k in range(n)]
+            assert stored == expected, f"burst of {n} at {addr:#08x}, wstrb {wstrbs}: model memory {stored}"
+            assert await env.read_burst(addr, n) == expected
+    await env.finish()
+
+
+@cocotb.test()
 async def test_burst_random(dut):
     """Random mix of burst reads/writes and single-word accesses with byte strobes against a
     scoreboard, back to back or with random idle gaps."""
@@ -332,9 +362,10 @@ async def test_burst_random(dut):
             assert got == expected, f"burst read of {n} at {addr:#08x}"
         elif op < 0.7:
             words = [rng.getrandbits(32) for _ in range(n)]
-            await env.write_burst(addr, words)
-            for i, w in enumerate(words):
-                scoreboard[addr + 4 * i] = w
+            wstrbs = [0xF if rng.random() < 0.5 else rng.randrange(16) for _ in range(n)]
+            await env.write_burst(addr, words, wstrbs)
+            for i, (w, m) in enumerate(zip(words, wstrbs, strict=True)):
+                scoreboard[addr + 4 * i] = strobe_merge(scoreboard[addr + 4 * i], w, m)
         elif op < 0.85:
             assert await env.read(addr) == scoreboard[addr], f"read {addr:#08x}"
         else:
@@ -386,6 +417,10 @@ async def test_latency(dut):
         _, t = await env.burst(True, 0x6000, list(range(n)))
         assert t.wdata_next == [28 + 2 * k for k in range(1, n)], f"write {n}: {t}"
         assert t.beats == [32 + 2 * n] and t.last == 32 + 2 * n and t.ready == 32 + 2 * n, f"write {n}: {t}"
+        # Byte enables do not change the timing, fully masked words included
+        wstrbs = [0x0, 0x5] + [0xA, 0xF, 0x0][: n - 2] + [0xF] * (n - 5)
+        _, tm = await env.burst(True, 0x7000, list(range(n)), wstrbs=wstrbs[:n])
+        assert tm == t, f"write {n} with strobes {wstrbs[:n]}: {tm}"
         data, t = await env.burst(False, 0x6000, n=n)
         assert data == list(range(n)), f"read {n}: {data}"
         assert t.beats == [32 + 2 * k for k in range(n)], f"read {n}: {t}"

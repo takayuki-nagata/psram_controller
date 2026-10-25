@@ -170,7 +170,8 @@ pub module psram_core #(
     let read_end  : logic    = timer[0] && pair == len5 + 5'd1;
     let write_last: logic    = timer[0] && pair == len5;
 
-    // Host write data word k (1..N-1) is loaded from req_wdata at the end of cycle 29 + 2k
+    // Host write data word k (1..N-1) is loaded from req_wdata (and its byte enables from
+    // req_wstrb) at the end of cycle 29 + 2k
     // (WRITE_DATA timer 2k - 1); wdata_next is High in the cycle before (timer 2k - 2)
     assign wdata_next = state == State::WRITE_DATA && !timer[0] && pair <: len5;
 
@@ -305,8 +306,9 @@ pub module psram_core #(
 
                 // timer 2k: host word k [15:0] on DQ (CK rising edge); load [31:16]
                 // timer 2k + 1: host word k [31:16] on DQ (CK falling edge); load word k + 1
-                //               from req_wdata (wdata_next was High in the cycle before), or
-                //               end the burst after the last word (timer 2N - 1)
+                //               and its byte enables from req_wdata/req_wstrb (wdata_next
+                //               was High in the cycle before), or end the burst after the
+                //               last word (timer 2N - 1)
                 State::WRITE_DATA: {
                     r_ck  =  ~r_ck;
                     timer += 16'd1;
@@ -315,8 +317,9 @@ pub module psram_core #(
                         r_rwds_out = {~r_wstrb[3], ~r_wstrb[2]};
                     } else if !write_last {
                         r_wdata    = req_wdata;
+                        r_wstrb    = req_wstrb;
                         r_dq_out   = req_wdata[15:0];
-                        r_rwds_out = {~r_wstrb[1], ~r_wstrb[0]};
+                        r_rwds_out = {~req_wstrb[1], ~req_wstrb[0]};
                     } else {
                         r_dq_oe   = 1'b0;
                         r_rwds_oe = 1'b0;

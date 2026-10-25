@@ -106,7 +106,7 @@ Following `CS#` assertion Low, a 48-bit (6-byte) Command-Address packet is trans
   - The controller drives `DQ[15:0]` on both clock edges, center aligned (data changes on the system clock rising edge, CK changes on the falling edge).
   - `RWDS[1:0]` acts as byte write masks (`0` = write byte, `1` = mask byte), driven Low as a preamble for one PSRAM clock before the data.
   - A 32-bit word is written across 2 DDR half-cycles (host `wdata[15:0]` on the CK rising edge, `wdata[31:16]` on the falling edge).
-  - A burst write of N words continues with word k on the edges 2k and 2k + 1 of the data phase; the host supplies word k in the cycle after `wdata_next`.
+  - A burst write of N words continues with word k on the edges 2k and 2k + 1 of the data phase; the host supplies word k and its byte enables (the RWDS masks of its two half words) in the cycle after `wdata_next`.
 - **Read Transaction**:
   - The PSRAM drives `DQ[15:0]` and `RWDS` edge aligned (valid tCKD <= 5.5 ns after each CK edge).
   - The controller samples each half word half a system clock after the CK edge that launched it, and keeps CS# Low for one more cycle so the last half word is still driven when sampled (datasheet Table 14 note 3).

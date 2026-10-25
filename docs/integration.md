@@ -66,7 +66,7 @@ constraints of [`demo/tangnano9k/tangnano9k.cst`](../demo/tangnano9k/tangnano9k.
 - **Bursts**: `MAX_BURST_WORDS` (1, 2, 4, 8 or 16; default 1) is the longest burst;
   `req_len` (`max(1, clog2(MAX_BURST_WORDS))` bits) is the number of words - 1,
   N = `req_len` + 1. A burst (`req_len` > 0) must be a memory access with `req_addr`
-  aligned to 4N bytes; burst writes must have `req_wstrb = 4'b1111`. Register accesses
+  aligned to 4N bytes. Register accesses
   use `req_len = 0` (the controller treats them as single words regardless). Words are
   transferred in ascending address order from `req_addr`.
 - **Request**: accepted in a cycle with `req_valid && req_ready`. Once `req_valid` is
@@ -76,9 +76,12 @@ constraints of [`demo/tangnano9k/tangnano9k.cst`](../demo/tangnano9k/tangnano9k.
 - **Response**: reads get one response per word, writes one response: `rsp_valid` High
   for one cycle, `rsp_rdata` valid in that cycle for reads, `rsp_last` High with the
   last (for writes and single words: the only) response.
-- **Burst write data**: word 0 is `req_wdata` at acceptance. Word k (1..N-1) is
-  `req_wdata` in cycle 29 + 2k, the cycle after `wdata_next` is High; `req_wdata` is
-  don't-care in all other cycles after acceptance, and `req_valid` may be Low meanwhile.
+- **Burst write data**: word 0 is `req_wdata` with byte enables `req_wstrb` at
+  acceptance. Word k (1..N-1) is `req_wdata` with byte enables `req_wstrb` in cycle
+  29 + 2k, the cycle after `wdata_next` is High; both are don't-care in all other cycles
+  after acceptance, and `req_valid` may be Low meanwhile. Any byte enables are allowed
+  per word, `4'b0000` included (the word is not written but still takes its two cycles),
+  and the data of disabled bytes may be X.
 - **Timing**: fixed, see [the table below](#timing); no RWDS-dependent or variable
   latency. Checked cycle by cycle by `test_latency` (18 and 27 MHz) and proven for every
   length by `make formal`.
@@ -89,7 +92,9 @@ constraints of [`demo/tangnano9k/tangnano9k.cst`](../demo/tangnano9k/tangnano9k.
   `req_wdata = {v[7:0], v[7:0], v[15:8], v[15:8]}`; register writes ignore `req_wstrb`.
   Do not change CR0's latency or burst fields: the controller relies on the default fixed
   latency, and on the default 32-byte wrapped burst for bursts of up to 16 words.
-- **Byte enables**: `req_wstrb[i]` writes byte `i` of `req_wdata` (memory writes).
+- **Byte enables**: `req_wstrb[i]` writes byte `i` of `req_wdata` (memory writes; per
+  word in a burst write, see above). They drive the RWDS write masks; a disabled byte
+  leaves the PSRAM byte unchanged.
 - **Reset**: `rst_n` is asynchronous, active Low; a reset during a transaction aborts it
   (no further response) and restarts the PSRAM power-up sequence.
 

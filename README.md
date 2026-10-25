@@ -221,12 +221,12 @@ The tests run at 18 MHz (VUX9K) and 27 MHz (this board). Parameter `MAX_BURST_WO
 | `req_we` | Input | 1 | `1`: write, `0`: read |
 | `req_addr` | Input | 24 | Byte address, 4-byte aligned (bit 23: `0` = memory, `1` = register space) |
 | `req_wdata` | Input | 32 | Write data |
-| `req_wstrb` | Input | 4 | Byte enables for memory writes (all set for burst writes) |
+| `req_wstrb` | Input | 4 | Byte enables for memory writes (per word in a burst write) |
 | `req_len` | Input | max(1, clog2(`MAX_BURST_WORDS`)) | Burst length - 1 (memory only, address aligned to the length; 0 for single words) |
 | `rsp_valid` | Output | 1 | One-cycle response: one per word for reads, one per write |
 | `rsp_last` | Output | 1 | With the last response of a request |
 | `rsp_rdata` | Output | 32 | Read data, valid with `rsp_valid` |
-| `wdata_next` | Output | 1 | Burst write: drive the next word on `req_wdata` in the next cycle |
+| `wdata_next` | Output | 1 | Burst write: drive the next word on `req_wdata`/`req_wstrb` in the next cycle |
 | `init_done` | Output | 1 | PSRAM power-up sequence finished (`req_ready` is Low until then) |
 | `dbg_sample` | Output | 32 | FSM/pin state for an on-chip tracer; leave unconnected if unused |
 
